@@ -174,10 +174,10 @@ If you run into bugs, have suggestions, or want to share screenshots, open an is
 
 ---
 
-```md
-
-![Icon](https://s13.gifyu.com/images/bmHGO.png)
-```
+## Mod Mirrors
+[**GTA5-Mods**](https://www.gta5-mods.com/scripts/dynamic-traffic-colors#description_tab)
+**NexusMods Enhanced Page**
+**NexusMods Legacy Page**
 
 ---
 
