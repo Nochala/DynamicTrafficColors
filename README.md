@@ -153,6 +153,7 @@ This mod is intended for users who want improved traffic appearance while stayin
 ## Credits
 
 Created by **Nochala**
+
 Alexander Blade — for ScriptHookV
 
 Additional thanks to:
