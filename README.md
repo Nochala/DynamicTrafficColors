@@ -153,6 +153,11 @@ This mod is intended for users who want improved traffic appearance while stayin
 ## Credits
 
 Created by **Nochala**
+Alexander Blade — for ScriptHookV
+
+Additional thanks to:
+- The GTA V modding community for documentation, shared research, and reverse-engineering efforts
+- Everyone who reports bugs or provides feedback — your input directly improves future updates
 
 ---
 
