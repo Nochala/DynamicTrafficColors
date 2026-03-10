@@ -13,7 +13,7 @@
 
 **Dynamic Traffic Colors** is a native **ScriptHookV** mod that improves how traffic vehicles look in **GTA V** by giving them much better paint variety, stronger anti-repetition logic, and more interesting combinations overall.
 
-Vanilla traffic often leans too heavily on the same small group of colors, which can make the world feel repetitive over time. This mod fixes that by applying smarter color selection in the background while staying smooth and stable in actual gameplay.
+Vanilla traffic leans too heavily on the same small group of colors, which can make the world feel repetitive over time. This mod fixes that by applying smarter color selection in the background while staying smooth and stable in actual gameplay.
 
 The result is traffic that feels more natural, more diverse, and much more alive.
 
