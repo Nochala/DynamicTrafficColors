@@ -1,6 +1,6 @@
 # Dynamic Traffic Colors
 
-> A native **ScriptHookV** mod for **GTA V** that makes traffic look far more varied, believable, and less repetitive.
+> A ScriptHookV plugin that enhances GTA V traffic immersion by increasing the variety of vehicle spawn colors, liveries, & decals.
 
 ![Platform](https://img.shields.io/badge/platform-GTA%20V-111111?style=for-the-badge)
 ![Type](https://img.shields.io/badge/mod-ScriptHookV-111111?style=for-the-badge)
