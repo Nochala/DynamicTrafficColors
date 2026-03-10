@@ -72,7 +72,7 @@ Instead of letting traffic constantly fall back on the same familiar looks, **Dy
 
 ## Installation
 
-1. Install **ScriptHookV**
+1. Install **[ScriptHookV](https://www.dev-c.com/gtav/scripthookv/)**
 2. Drag the mod files into your main **GTA V** folder
 3. Launch the game
 4. Edit the included `.ini` to customize behavior if needed
