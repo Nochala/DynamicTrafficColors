@@ -152,7 +152,7 @@ This mod is intended for users who want improved traffic appearance while stayin
 
 ## Credits
 
-Created by **Beast Cast**
+Created by **Nochala**
 
 ---
 
@@ -167,10 +167,6 @@ Grab the latest release from the **Releases** section of this repository.
 If you run into bugs, have suggestions, or want to share screenshots, open an issue or leave feedback on the mod page.
 
 ---
-
-## Preview section idea
-
-If you want to make this page look even better, add screenshots or GIFs under this section:
 
 ```md
 ## Screenshots
