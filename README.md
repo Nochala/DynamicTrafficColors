@@ -176,8 +176,8 @@ If you run into bugs, have suggestions, or want to share screenshots, open an is
 
 ## Mod Mirrors
 [**GTA5-Mods**](https://www.gta5-mods.com/scripts/dynamic-traffic-colors#description_tab)
-**NexusMods Enhanced Page**
-**NexusMods Legacy Page**
+[**NexusMods Enhanced Page**](https://www.nexusmods.com/gta5enhanced/mods/514?tab=description)
+[**NexusMods Legacy Page**](https://www.nexusmods.com/gta5/mods/1688)
 
 ---
 
