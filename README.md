@@ -154,7 +154,7 @@ This mod is intended for users who want improved traffic appearance while stayin
 
 Created by **Nochala**
 
-Alexander Blade — for ScriptHookV
+**Alexander Blade — for ScriptHookV**
 
 Additional thanks to:
 - The GTA V modding community for documentation, shared research, and reverse-engineering efforts
@@ -175,11 +175,8 @@ If you run into bugs, have suggestions, or want to share screenshots, open an is
 ---
 
 ```md
-## Screenshots
 
-![Screenshot 1](your-image-link-here)
-![Screenshot 2](your-image-link-here)
-![Screenshot 3](your-image-link-here)
+![Icon](https://s13.gifyu.com/images/bmHGO.png)
 ```
 
 ---
