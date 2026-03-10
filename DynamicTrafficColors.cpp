@@ -1,0 +1,964 @@
+
+// Written by:
+// 
+// ███╗   ██╗ ██████╗  ██████╗██╗  ██╗ █████╗ ██╗      █████╗ 
+// ████╗  ██║██╔═══██╗██╔════╝██║  ██║██╔══██╗██║     ██╔══██╗
+// ██╔██╗ ██║██║   ██║██║     ███████║███████║██║     ███████║
+// ██║╚██╗██║██║   ██║██║     ██╔══██║██╔══██║██║     ██╔══██║
+// ██║ ╚████║╚██████╔╝╚██████╗██║  ██║██║  ██║███████╗██║  ██║
+// ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
+//
+//          ░░▒▒▓▓ https://github.com/Nochala ▓▓▒▒░░
+
+#include "script.h"
+#include <windows.h>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <deque>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <sstream>
+#include <cctype>
+#include <natives.h>
+
+static std::string GetModuleDir()
+{
+    char path[MAX_PATH];
+    path[0] = '\0';
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    std::string s(path);
+    size_t pos = s.find_last_of("\\/");
+    if (pos == std::string::npos) return std::string();
+    return s.substr(0, pos);
+}
+
+static std::string IniPath() { return GetModuleDir() + "\\DynamicTrafficColors.ini"; }
+
+static int IniInt(const std::string& ini, const char* sec, const char* key, int defVal)
+{
+    return (int)GetPrivateProfileIntA(sec, key, defVal, ini.c_str());
+}
+
+static float IniFloat(const std::string& ini, const char* sec, const char* key, float defVal)
+{
+    char buf[64], defBuf[64];
+    std::snprintf(defBuf, sizeof(defBuf), "%.3f", defVal);
+    GetPrivateProfileStringA(sec, key, defBuf, buf, sizeof(buf), ini.c_str());
+    return (float)std::atof(buf);
+}
+
+static bool IniBool(const std::string& ini, const char* sec, const char* key, bool defVal)
+{
+    char buf[64];
+    buf[0] = ' ';
+    GetPrivateProfileStringA(sec, key, defVal ? "true" : "false", buf, sizeof(buf), ini.c_str());
+
+    std::string s(buf);
+    size_t start = 0;
+    while (start < s.size() && std::isspace((unsigned char)s[start])) ++start;
+    size_t end = s.size();
+    while (end > start && std::isspace((unsigned char)s[end - 1])) --end;
+    s = s.substr(start, end - start);
+
+    for (size_t i = 0; i < s.size(); ++i)
+        s[i] = (char)std::tolower((unsigned char)s[i]);
+
+    if (s == "true") return true;
+    if (s == "false") return false;
+    return defVal;
+}
+
+static std::string IniString(const std::string& ini, const char* sec, const char* key, const char* defVal)
+{
+    char buf[128];
+    buf[0] = '\0';
+    GetPrivateProfileStringA(sec, key, defVal, buf, sizeof(buf), ini.c_str());
+    return std::string(buf);
+}
+
+static std::string LogPathFromIni(const std::string& iniPath)
+{
+    char buf[MAX_PATH];
+    buf[0] = '\0';
+    GetPrivateProfileStringA("Logging", "LogFile", "DynamicTrafficColors.log", buf, MAX_PATH, iniPath.c_str());
+    std::string name(buf);
+    if (name.find(':') == std::string::npos && name.find('\\') == std::string::npos && name.find('/') == std::string::npos)
+        return GetModuleDir() + "\\" + name;
+    return name;
+}
+
+static DWORD GameTimeMs() { return (DWORD)GAMEPLAY::GET_GAME_TIMER(); }
+static int RandInt(int minIncl, int maxExcl) { return (maxExcl <= minIncl) ? minIncl : GAMEPLAY::GET_RANDOM_INT_IN_RANGE(minIncl, maxExcl); }
+
+static bool KeyJustUp(int vk)
+{
+    static SHORT prev[256] = {};
+    if (vk < 0 || vk > 255) return false;
+    SHORT now = GetAsyncKeyState(vk);
+    bool wasDown = (prev[vk] & 0x8000) != 0;
+    bool isDown = (now & 0x8000) != 0;
+    prev[vk] = now;
+    return wasDown && !isDown;
+}
+
+class Logger
+{
+public:
+    Logger() : enabled_(false), handle_(INVALID_HANDLE_VALUE) {}
+    ~Logger() { Close(); }
+
+    void Configure(bool enabled, const std::string& path)
+    {
+        enabled_ = enabled;
+        path_ = path;
+        Close();
+        if (!enabled_) return;
+        handle_ = CreateFileA(path_.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (handle_ != INVALID_HANDLE_VALUE)
+            WriteLine("[DynamicTrafficColors] Logging started.");
+    }
+
+    void Close()
+    {
+        if (handle_ != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    bool IsEnabled() const
+    {
+        return enabled_ && handle_ != INVALID_HANDLE_VALUE;
+    }
+
+    void WriteLine(const std::string& s)
+    {
+        if (!enabled_ || handle_ == INVALID_HANDLE_VALUE) return;
+        std::string out = s + "";
+            DWORD written = 0;
+        WriteFile(handle_, out.c_str(), (DWORD)out.size(), &written, NULL);
+    }
+
+private:
+    bool enabled_;
+    std::string path_;
+    HANDLE handle_;
+};
+
+struct Config
+{
+    bool Enabled;
+    bool EnableColors;
+    bool EnableLiveries;
+    bool EnableDecals;
+    bool EnableWheelColors;
+    float Radius;
+    float AircraftRadius;
+    int UpdateIntervalMs;
+    int RecentPerModel;
+    int AircraftRecentPerModel;
+    int GlobalRecentColorMemory;
+    bool AffectOnlyTraffic;
+    bool SkipEmergency;
+    bool SkipMissionVehicles;
+    bool ServiceVehiclesKeepColors;
+    bool RequireOffscreenApply;
+    bool StrictSpawnOnly;
+    int NewlySeenMaxAgeMs;
+    bool RealisticVehicleColors;
+    bool AllowBrightColors;
+    bool RainbowMode;
+    int ColorVarietyMultiplier;
+    int NonRealisticRecentPrimaryMemory;
+    int NonRealisticRecentSecondaryMemory;
+    int NonRealisticOverusedColorPenalty;
+    bool EnablePlanes;
+    bool EnableHelicopters;
+    bool AircraftKeepLiveries;
+    int LiveryChancePercent;
+    int DecalChancePercent;
+    int AircraftLiveryChancePercent;
+    int AircraftDecalChancePercent;
+    bool ShowLoadNotification;
+    std::string ReloadCheatCode;
+
+    Config()
+    {
+        Enabled = true;
+        EnableColors = true;
+        EnableLiveries = true;
+        EnableDecals = true;
+        EnableWheelColors = true;
+        Radius = 170.0f;
+        AircraftRadius = 260.0f;
+        UpdateIntervalMs = 160;
+        RecentPerModel = 90;
+        AircraftRecentPerModel = 50;
+        GlobalRecentColorMemory = 140;
+        AffectOnlyTraffic = true;
+        SkipEmergency = true;
+        SkipMissionVehicles = true;
+        ServiceVehiclesKeepColors = true;
+        RequireOffscreenApply = true;
+        StrictSpawnOnly = true;
+        NewlySeenMaxAgeMs = 900;
+        RealisticVehicleColors = true;
+        AllowBrightColors = true;
+        RainbowMode = false;
+        ColorVarietyMultiplier = 240;
+        NonRealisticRecentPrimaryMemory = 120;
+        NonRealisticRecentSecondaryMemory = 90;
+        NonRealisticOverusedColorPenalty = 7;
+        EnablePlanes = true;
+        EnableHelicopters = true;
+        AircraftKeepLiveries = false;
+        LiveryChancePercent = 10;
+        DecalChancePercent = 14;
+        AircraftLiveryChancePercent = 18;
+        AircraftDecalChancePercent = 10;
+        ShowLoadNotification = true;
+        ReloadCheatCode = "DTCRELOAD";
+    }
+};
+
+static Config gCfg;
+static Logger gLog;
+
+static const int kScanArraySize = 128;
+static const int kVehiclesExaminedPerTick = 4;
+static const int kMaxAppliesPerTick = 1;
+static const int kRainbowVehiclesExaminedPerTick = 12;
+static const int kRainbowMaxAppliesPerTick = 4;
+static const DWORD kSnapshotRefreshIntervalMs = 4000;
+static const DWORD kRainbowSnapshotRefreshIntervalMs = 900;
+static const float kSnapshotRefreshMoveDistanceSq = 35.0f * 35.0f;
+static const float kRainbowSnapshotRefreshMoveDistanceSq = 8.0f * 8.0f;
+static const int kRerollAttempts = 16;
+static const DWORD kStartupWarmupMs = 3500;
+static const DWORD kCleanupIntervalMs = 2500;
+static const DWORD kSeenTtlMs = 18000;
+static const int kVehicleModTypeLivery = 48;
+
+static int MaxInt(int a, int b) { return (a > b) ? a : b; }
+static int ClampPct(int v) { return (v < 0) ? 0 : ((v > 100) ? 100 : v); }
+
+static Hash HashName(const char* name) { return GAMEPLAY::GET_HASH_KEY((char*)name); }
+
+static float DistSq(const Vector3& a, const Vector3& b)
+{
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+static bool IsWithinRadiusSq(const Vector3& a, const Vector3& b, float radius)
+{
+    return DistSq(a, b) <= (radius * radius);
+}
+static bool ChancePass(int pct)
+{
+    pct = ClampPct(pct);
+    if (pct <= 0) return false;
+    if (pct >= 100) return true;
+    return RandInt(0, 100) < pct;
+}
+
+static bool IsPlayerVehicle(Vehicle v)
+{
+    Ped playerPed = PLAYER::PLAYER_PED_ID();
+    if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return false;
+    Vehicle pv = PED::GET_VEHICLE_PED_IS_IN(playerPed, false);
+    return pv != 0 && pv == v;
+}
+static bool IsEmergencyVehicle(Vehicle v) { return VEHICLE::GET_VEHICLE_CLASS(v) == 18; }
+static bool IsMissionEntityVehicle(Vehicle v) { return ENTITY::IS_ENTITY_A_MISSION_ENTITY(v) != 0; }
+static bool IsVehicleDriveableSafe(Vehicle v) { return VEHICLE::IS_VEHICLE_DRIVEABLE(v, false) != 0; }
+static bool IsOnScreenSafe(Entity e) { return ENTITY::IS_ENTITY_ON_SCREEN(e) != 0; }
+static bool IsPlane(Vehicle v) { return VEHICLE::GET_VEHICLE_CLASS(v) == 16; }
+static bool IsHelicopter(Vehicle v) { return VEHICLE::GET_VEHICLE_CLASS(v) == 15; }
+static bool IsAircraft(Vehicle v) { int vc = VEHICLE::GET_VEHICLE_CLASS(v); return vc == 15 || vc == 16; }
+
+static bool IsServiceVehicleModel(Hash model)
+{
+    static std::vector<Hash> models;
+    if (models.empty())
+    {
+        const char* names[] = {
+            "taxi","airbus","brickade","bus","coach","rentalbus","tourbus","trash","trash2","mule","mule2","mule3","mule4",
+            "benson","boxville","boxville2","boxville3","boxville4","boxville5","packer","pounder","pounder2","stockade",
+            "stockade3","tiptruck","tiptruck2","towtruck","towtruck2","flatbed","utillitruck","utillitruck2","utillitruck3",
+            "docktug","ripley","airtug","tractor","tractor2","tractor3","forklift","mixer","mixer2","rubble"
+        };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) models.push_back(HashName(names[i]));
+    }
+    return std::find(models.begin(), models.end(), model) != models.end();
+}
+
+struct WeightedPalette
+{
+    std::vector<int> ultraCommon, common, uncommon, rare, bright;
+    std::vector<int> neutrals, blues, reds, greens, warm, unusual;
+};
+
+static void AppendRange(std::vector<int>& out, const int* vals, size_t count) { out.insert(out.end(), vals, vals + count); }
+
+static WeightedPalette BuildRealisticPalette()
+{
+    WeightedPalette p;
+    const int neutrals[] = {
+        0,1,2,3,4,5,27,111,112,121,122,123,124,131,132,133,134,135,136,137,138,139,140,147
+    };
+    const int blues[] = {
+        54,60,61,62,63,64,65,66,67,68,69,70,73,74,75,76,77,78,79,80,82,83,84,85
+    };
+    const int reds[] = {
+        27,28,29,30,31,32,33,34,35,39,40,43,44,46
+    };
+    const int greens[] = {
+        49,50,51,52,53,55,56,57,92,125,128,129,130,151
+    };
+    const int warm[] = {
+        88,89,90,91,94,95,96,97,98,99,100,101,102,103,104,105,107,108,109,110
+    };
+    const int unusual[] = {
+        41,42,47,48,58,59,71,72,81,86,87,113,114,115,116,117,118,119,120,126,127,141,142,143,145,146,148,149,150,152,153,154,155,156,157,158,159,160
+    };
+    const int bright[] = { 15, 53, 64, 73, 88, 89, 112, 135 };
+
+    AppendRange(p.neutrals, neutrals, sizeof(neutrals) / sizeof(neutrals[0]));
+    AppendRange(p.blues, blues, sizeof(blues) / sizeof(blues[0]));
+    AppendRange(p.reds, reds, sizeof(reds) / sizeof(reds[0]));
+    AppendRange(p.greens, greens, sizeof(greens) / sizeof(greens[0]));
+    AppendRange(p.warm, warm, sizeof(warm) / sizeof(warm[0]));
+    AppendRange(p.unusual, unusual, sizeof(unusual) / sizeof(unusual[0]));
+    AppendRange(p.bright, bright, sizeof(bright) / sizeof(bright[0]));
+
+    for (int v : p.neutrals) { for (int i = 0; i < 3; ++i) p.ultraCommon.push_back(v); for (int i = 0; i < 2; ++i) p.common.push_back(v); }
+    for (int v : p.blues) { for (int i = 0; i < 4; ++i) p.common.push_back(v); for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); }
+    for (int v : p.reds) { for (int i = 0; i < 1; ++i) p.common.push_back(v); for (int i = 0; i < 1; ++i) p.uncommon.push_back(v); }
+    for (int v : p.greens) { for (int i = 0; i < 3; ++i) p.common.push_back(v); for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); }
+    for (int v : p.warm) { for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); for (int i = 0; i < 1; ++i) p.rare.push_back(v); }
+    for (int v : p.unusual) { for (int i = 0; i < 3; ++i) p.rare.push_back(v); }
+    return p;
+}
+
+static WeightedPalette BuildArcadePalette()
+{
+    WeightedPalette p;
+    const int all[] = {
+        0,1,2,3,4,5,11,12,13,15,21,24,27,28,29,30,31,32,33,34,35,36,38,39,40,41,42,43,44,46,47,
+        49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,
+        79,80,81,82,83,84,85,86,87,88,89,90,91,92,94,95,96,97,98,99,100,101,102,103,104,105,107,108,
+        109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,
+        132,133,134,135,136,137,138,139,140,141,142,143,145,146,147,148,149,150,151,152,153,154,155,
+        156,157,158,159,160
+    };
+    const int bright[] = { 11,12,13,15,21,24,36,38,47,53,58,64,72,73,81,88,89,112,117,135,145,146,150,151,152,157,160 };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
+    {
+        p.common.push_back(all[i]);
+        p.uncommon.push_back(all[i]);
+    }
+    for (size_t i = 0; i < sizeof(bright) / sizeof(bright[0]); ++i)
+    {
+        p.rare.push_back(bright[i]);
+        p.bright.push_back(bright[i]);
+    }
+    return p;
+}
+
+static WeightedPalette gRealisticPalette = BuildRealisticPalette();
+static WeightedPalette gArcadePalette = BuildArcadePalette();
+
+static const std::vector<int>& PickColorPool(const WeightedPalette& p, bool allowBright)
+{
+    const int roll = RandInt(0, 100);
+    if (allowBright && roll >= 95 && !p.bright.empty()) return p.bright;
+    if (roll < 16 && !p.ultraCommon.empty()) return p.ultraCommon;
+    if (roll < 42 && !p.common.empty()) return p.common;
+    if (roll < 78 && !p.uncommon.empty()) return p.uncommon;
+    if (!p.rare.empty()) return p.rare;
+    if (!p.common.empty()) return p.common;
+    return p.uncommon;
+}
+
+static int CountInRecent(const std::deque<int>& recent, int color)
+{
+    int c = 0;
+    for (size_t i = 0; i < recent.size(); ++i) if (recent[i] == color) ++c;
+    return c;
+}
+
+static bool RecentContains(const std::deque<int>& recent, int color)
+{
+    return std::find(recent.begin(), recent.end(), color) != recent.end();
+}
+
+static int BucketId(const WeightedPalette& p, int color)
+{
+    if (std::find(p.neutrals.begin(), p.neutrals.end(), color) != p.neutrals.end()) return 0;
+    if (std::find(p.blues.begin(), p.blues.end(), color) != p.blues.end()) return 1;
+    if (std::find(p.reds.begin(), p.reds.end(), color) != p.reds.end()) return 2;
+    if (std::find(p.greens.begin(), p.greens.end(), color) != p.greens.end()) return 3;
+    if (std::find(p.warm.begin(), p.warm.end(), color) != p.warm.end()) return 4;
+    if (std::find(p.unusual.begin(), p.unusual.end(), color) != p.unusual.end()) return 5;
+    return 6;
+}
+
+static int CountBucketInRecent(const WeightedPalette& p, const std::deque<int>& recent, int bucket)
+{
+    int c = 0;
+    for (size_t i = 0; i < recent.size(); ++i) if (BucketId(p, recent[i]) == bucket) ++c;
+    return c;
+}
+
+static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int varietyMultiplier, const std::deque<int>& recentBuckets)
+{
+    const std::vector<int>& pool = PickColorPool(p, allowBright);
+    if (pool.empty()) return 0;
+
+    int bestColor = pool[RandInt(0, (int)pool.size())];
+    int bestScore = -999999;
+
+    for (int i = 0; i < kRerollAttempts; ++i)
+    {
+        int color = pool[RandInt(0, (int)pool.size())];
+        int bucket = BucketId(p, color);
+        int bucketHits = CountBucketInRecent(p, recentBuckets, bucket);
+        int score = RandInt(0, 1000) - bucketHits * varietyMultiplier;
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestColor = color;
+        }
+    }
+    return bestColor;
+}
+
+struct SeenInfo
+{
+    DWORD firstSeen;
+    bool applied;
+    SeenInfo() : firstSeen(0), applied(false) {}
+    SeenInfo(DWORD t) : firstSeen(t), applied(false) {}
+};
+
+static std::unordered_map<int, SeenInfo> gSeen;
+static std::unordered_map<unsigned int, std::deque<int> > gRecentPrimaryByModel;
+static std::unordered_map<unsigned int, std::deque<int> > gRecentSecondaryByModel;
+static std::deque<int> gRecentGlobal;
+static std::deque<int> gRecentBuckets;
+static std::deque<int> gRecentCombos;
+static std::vector<int> gPoolSnapshot;
+static size_t gPoolCursor = 0;
+static Vector3 gLastSnapshotPlayerPos = { 0 };
+static bool gHasLastSnapshotPlayerPos = false;
+static DWORD gStartMs = 0;
+static DWORD gLastCleanupMs = 0;
+static DWORD gLastSnapshotMs = 0;
+static std::string gCheatBuffer;
+static DWORD gLastCheatKeyMs = 0;
+
+static void PushLimited(std::deque<int>& dq, int value, size_t cap)
+{
+    dq.push_back(value);
+    while (dq.size() > cap) dq.pop_front();
+}
+
+static int PackCombo(int primary, int secondary)
+{
+    return ((primary & 0xFF) << 8) | (secondary & 0xFF);
+}
+
+static bool RecentContainsCombo(const std::deque<int>& recent, int combo)
+{
+    return std::find(recent.begin(), recent.end(), combo) != recent.end();
+}
+
+static int CountComboInRecent(const std::deque<int>& recent, int combo)
+{
+    int c = 0;
+    for (size_t i = 0; i < recent.size(); ++i)
+        if (recent[i] == combo) ++c;
+    return c;
+}
+
+static void ReserveWorkingSet()
+{
+    gSeen.reserve(1024);
+    gRecentPrimaryByModel.reserve(256);
+    gRecentSecondaryByModel.reserve(256);
+    gPoolSnapshot.reserve(kScanArraySize);
+}
+
+static void MarkUsed(Hash model, int primary, int secondary, bool aircraft)
+{
+    PushLimited(gRecentPrimaryByModel[(unsigned int)model], primary, aircraft ? (size_t)gCfg.AircraftRecentPerModel : (size_t)gCfg.RecentPerModel);
+    PushLimited(gRecentSecondaryByModel[(unsigned int)model], secondary, aircraft ? (size_t)gCfg.AircraftRecentPerModel : (size_t)gCfg.RecentPerModel);
+    PushLimited(gRecentGlobal, primary, (size_t)gCfg.GlobalRecentColorMemory);
+    PushLimited(gRecentGlobal, secondary, (size_t)gCfg.GlobalRecentColorMemory);
+    PushLimited(gRecentBuckets, primary, 140);
+    PushLimited(gRecentBuckets, secondary, 140);
+    PushLimited(gRecentCombos, PackCombo(primary, secondary), 180);
+}
+
+static void CleanupSeen()
+{
+    DWORD now = GameTimeMs();
+    if (now - gLastCleanupMs < 8000) return;
+    gLastCleanupMs = now;
+
+    std::vector<int> dead;
+    dead.reserve(gSeen.size());
+    for (std::unordered_map<int, SeenInfo>::iterator it = gSeen.begin(); it != gSeen.end(); ++it)
+    {
+        int handle = it->first;
+        if (!ENTITY::DOES_ENTITY_EXIST(handle) || (now - it->second.firstSeen) > kSeenTtlMs)
+            dead.push_back(handle);
+    }
+    for (size_t i = 0; i < dead.size(); ++i) gSeen.erase(dead[i]);
+}
+
+static bool IsTrafficVehicle(Vehicle veh)
+{
+    if (!gCfg.AffectOnlyTraffic) return true;
+    Ped driver = VEHICLE::GET_PED_IN_VEHICLE_SEAT(veh, -1);
+    if (driver == 0 || !ENTITY::DOES_ENTITY_EXIST(driver)) return false;
+    if (PED::IS_PED_A_PLAYER(driver)) return false;
+    return true;
+}
+
+static bool AllowVehicleByFilters(Vehicle veh)
+{
+    if (!ENTITY::DOES_ENTITY_EXIST(veh)) return false;
+    if (!IsVehicleDriveableSafe(veh)) return false;
+    if (IsPlayerVehicle(veh)) return false;
+    if (!IsTrafficVehicle(veh)) return false;
+    if (gCfg.SkipEmergency && IsEmergencyVehicle(veh)) return false;
+    if (gCfg.SkipMissionVehicles && IsMissionEntityVehicle(veh)) return false;
+    Hash model = ENTITY::GET_ENTITY_MODEL(veh);
+    if (gCfg.ServiceVehiclesKeepColors && IsServiceVehicleModel(model)) return false;
+    return true;
+}
+
+static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int& outSecondary)
+{
+    const WeightedPalette& palette = (gCfg.RealisticVehicleColors && !gCfg.RainbowMode) ? gRealisticPalette : gArcadePalette;
+    std::deque<int>& recentPrimary = gRecentPrimaryByModel[(unsigned int)model];
+    std::deque<int>& recentSecondary = gRecentSecondaryByModel[(unsigned int)model];
+
+    int bestP = 0, bestS = 0, bestScore = -999999;
+    const int tries = gCfg.RainbowMode ? 32 : MaxInt(kRerollAttempts, 22);
+
+    for (int i = 0; i < tries; ++i)
+    {
+        const int p = PickBucketedColor(palette, gCfg.AllowBrightColors || gCfg.RainbowMode, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+        const int s = PickBucketedColor(palette, gCfg.AllowBrightColors || gCfg.RainbowMode, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+        const int primaryBucket = BucketId(palette, p);
+        const int secondaryBucket = BucketId(palette, s);
+        const int combo = PackCombo(p, s);
+        const bool preferContrast = gCfg.RainbowMode || RandInt(0, 100) < (gCfg.RealisticVehicleColors ? 42 : 68);
+
+        int score = RandInt(0, 700);
+
+        if (p != s) score += 95;
+        else score -= 75;
+
+        if (preferContrast)
+        {
+            if (primaryBucket != secondaryBucket) score += 125;
+            else score -= 70;
+        }
+        else
+        {
+            if (primaryBucket == secondaryBucket) score += 20;
+        }
+
+        if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
+        {
+            if (primaryBucket == 0) score -= 55;
+            if (secondaryBucket == 0) score -= 35;
+            if (primaryBucket == 2) score -= 40;
+            if (secondaryBucket == 2) score -= 22;
+            if (primaryBucket == 0 && secondaryBucket == 0) score -= 85;
+            if ((primaryBucket == 0 && secondaryBucket != 0) || (primaryBucket != 0 && secondaryBucket == 0)) score += 38;
+            if (primaryBucket == 1) score += 22;
+            if (secondaryBucket == 1) score += 18;
+            if (primaryBucket == 3) score += 18;
+            if (secondaryBucket == 3) score += 16;
+            if (primaryBucket >= 4) score += 26;
+            if (secondaryBucket >= 4) score += 28;
+        }
+
+        score -= CountInRecent(recentPrimary, p) * MaxInt(8, gCfg.NonRealisticOverusedColorPenalty * 3);
+        score -= CountInRecent(recentSecondary, s) * MaxInt(7, gCfg.NonRealisticOverusedColorPenalty * 2);
+        score -= CountInRecent(gRecentGlobal, p) * 5;
+        score -= CountInRecent(gRecentGlobal, s) * 4;
+        score -= CountBucketInRecent(palette, gRecentBuckets, primaryBucket) * MaxInt(10, gCfg.ColorVarietyMultiplier / 5);
+        score -= CountBucketInRecent(palette, gRecentBuckets, secondaryBucket) * MaxInt(8, gCfg.ColorVarietyMultiplier / 6);
+        score -= CountComboInRecent(gRecentCombos, combo) * 95;
+
+        if (RecentContainsCombo(gRecentCombos, combo)) score -= 180;
+        if (RecentContains(recentPrimary, p)) score -= 65;
+        if (RecentContains(recentSecondary, s)) score -= 45;
+        if (RecentContains(gRecentGlobal, p)) score -= 25;
+        if (RecentContains(gRecentGlobal, s)) score -= 18;
+
+        if (!gCfg.RealisticVehicleColors || gCfg.RainbowMode)
+        {
+            if (RecentContains(recentPrimary, p)) score -= gCfg.NonRealisticRecentPrimaryMemory;
+            if (RecentContains(recentSecondary, s)) score -= gCfg.NonRealisticRecentSecondaryMemory;
+            if (gCfg.RainbowMode)
+            {
+                if (p != s) score += 70;
+                if (primaryBucket != secondaryBucket) score += 100;
+            }
+        }
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestP = p;
+            bestS = s;
+        }
+    }
+
+    outPrimary = bestP;
+    outSecondary = bestS;
+    return true;
+}
+
+static bool TryApplyLivery(Vehicle veh, bool aircraft)
+{
+    if (!gCfg.EnableLiveries) return false;
+    if (aircraft && gCfg.AircraftKeepLiveries) return false;
+
+    int chance = aircraft ? gCfg.AircraftLiveryChancePercent : gCfg.LiveryChancePercent;
+    if (!ChancePass(chance)) return false;
+
+    VEHICLE::SET_VEHICLE_MOD_KIT(veh, 0);
+    int count = VEHICLE::GET_NUM_VEHICLE_MODS(veh, kVehicleModTypeLivery);
+    if (count > 0)
+    {
+        int idx = RandInt(0, count);
+        VEHICLE::SET_VEHICLE_MOD(veh, kVehicleModTypeLivery, idx, false);
+        return true;
+    }
+
+    int legacyCount = VEHICLE::GET_VEHICLE_LIVERY_COUNT(veh);
+    if (legacyCount > 0)
+    {
+        int idx = RandInt(0, legacyCount);
+        VEHICLE::SET_VEHICLE_LIVERY(veh, idx);
+        return true;
+    }
+    return false;
+}
+
+static bool TryApplyDecal(Vehicle veh, bool aircraft)
+{
+    if (!gCfg.EnableDecals) return false;
+    int chance = aircraft ? gCfg.AircraftDecalChancePercent : gCfg.DecalChancePercent;
+    if (!ChancePass(chance)) return false;
+
+    VEHICLE::SET_VEHICLE_MOD_KIT(veh, 0);
+    const int modTypeRoofLivery = 10;
+    int count = VEHICLE::GET_NUM_VEHICLE_MODS(veh, modTypeRoofLivery);
+    if (count > 0)
+    {
+        int idx = RandInt(0, count);
+        VEHICLE::SET_VEHICLE_MOD(veh, modTypeRoofLivery, idx, false);
+        return true;
+    }
+    return false;
+}
+
+static void ApplyToVehicle(Vehicle veh)
+{
+    if (!AllowVehicleByFilters(veh)) return;
+    bool aircraft = IsAircraft(veh);
+
+    int primary = 0, secondary = 0;
+    Hash model = ENTITY::GET_ENTITY_MODEL(veh);
+    bool changedColors = false;
+    if (gCfg.EnableColors)
+    {
+        PickPrimarySecondary(model, aircraft, primary, secondary);
+        VEHICLE::SET_VEHICLE_COLOURS(veh, primary, secondary);
+        if (gCfg.EnableWheelColors)
+        {
+            int pearlescent = 0, wheelColor = 0;
+            VEHICLE::GET_VEHICLE_EXTRA_COLOURS(veh, &pearlescent, &wheelColor);
+            wheelColor = secondary;
+            VEHICLE::SET_VEHICLE_EXTRA_COLOURS(veh, pearlescent, wheelColor);
+        }
+        MarkUsed(model, primary, secondary, aircraft);
+        changedColors = true;
+    }
+
+    const bool appliedLivery = TryApplyLivery(veh, aircraft);
+    const bool appliedDecal = TryApplyDecal(veh, aircraft);
+
+    if (gLog.IsEnabled() && (changedColors || appliedLivery || appliedDecal))
+    {
+        std::ostringstream oss;
+        oss << "Applied vehicle=" << (int)veh
+            << " model=0x" << std::hex << (unsigned int)model << std::dec
+            << " primary=" << primary
+            << " secondary=" << secondary
+            << " aircraft=" << (aircraft ? 1 : 0)
+            << " livery=" << (appliedLivery ? 1 : 0)
+            << " decal=" << (appliedDecal ? 1 : 0);
+        gLog.WriteLine(oss.str());
+    }
+
+    gSeen[(int)veh].applied = true;
+}
+
+static bool ShouldHandleCategory(Vehicle veh)
+{
+    if (IsAircraft(veh))
+    {
+        if (IsPlane(veh) && !gCfg.EnablePlanes) return false;
+        if (IsHelicopter(veh) && !gCfg.EnableHelicopters) return false;
+    }
+    return true;
+}
+
+static void RefreshVehicleSnapshot()
+{
+    if (gPoolCursor < gPoolSnapshot.size())
+        return;
+
+    const DWORD now = GameTimeMs();
+    if (!gCfg.Enabled) return;
+    if (now - gStartMs < kStartupWarmupMs) return;
+
+    Ped player = PLAYER::PLAYER_PED_ID();
+    if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
+    Vector3 ppos = ENTITY::GET_ENTITY_COORDS(player, true);
+
+    const float moveDistanceSq = gCfg.RainbowMode ? kRainbowSnapshotRefreshMoveDistanceSq : kSnapshotRefreshMoveDistanceSq;
+    const DWORD refreshIntervalMs = gCfg.RainbowMode ? kRainbowSnapshotRefreshIntervalMs : kSnapshotRefreshIntervalMs;
+    const bool movedEnough = !gHasLastSnapshotPlayerPos || DistSq(ppos, gLastSnapshotPlayerPos) >= moveDistanceSq;
+    const bool waitedLongEnough = (now - gLastSnapshotMs) >= refreshIntervalMs;
+    if (!movedEnough && !waitedLongEnough)
+        return;
+
+    Vehicle pool[kScanArraySize];
+    const int count = worldGetAllVehicles(pool, kScanArraySize);
+
+    gPoolSnapshot.clear();
+    gPoolCursor = 0;
+    for (int i = 0; i < count; ++i)
+        gPoolSnapshot.push_back((int)pool[i]);
+
+    gLastSnapshotMs = now;
+    gLastSnapshotPlayerPos = ppos;
+    gHasLastSnapshotPlayerPos = true;
+    CleanupSeen();
+}
+
+static void ProcessVehicleSnapshot()
+{
+    if (!gCfg.Enabled) return;
+    if (gPoolCursor >= gPoolSnapshot.size()) return;
+
+    Ped player = PLAYER::PLAYER_PED_ID();
+    if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
+    Vector3 ppos = ENTITY::GET_ENTITY_COORDS(player, true);
+    const DWORD now = GameTimeMs();
+    const int maxExamined = gCfg.RainbowMode ? kRainbowVehiclesExaminedPerTick : kVehiclesExaminedPerTick;
+    const int maxApplied = gCfg.RainbowMode ? kRainbowMaxAppliesPerTick : kMaxAppliesPerTick;
+
+    int examined = 0;
+    int applied = 0;
+    while (gPoolCursor < gPoolSnapshot.size() && examined < maxExamined && applied < maxApplied)
+    {
+        Vehicle veh = (Vehicle)gPoolSnapshot[gPoolCursor++];
+        ++examined;
+
+        if (!ENTITY::DOES_ENTITY_EXIST(veh)) continue;
+        if (!ShouldHandleCategory(veh)) continue;
+        if (!AllowVehicleByFilters(veh)) continue;
+
+        const float radius = IsAircraft(veh) ? gCfg.AircraftRadius : gCfg.Radius;
+        if (!IsWithinRadiusSq(ENTITY::GET_ENTITY_COORDS(veh, true), ppos, radius)) continue;
+
+        SeenInfo& si = gSeen[(int)veh];
+        if (si.firstSeen == 0) si.firstSeen = now;
+
+        if (!gCfg.RainbowMode)
+        {
+            if (gCfg.StrictSpawnOnly && si.applied) continue;
+            if ((now - si.firstSeen) > (DWORD)MaxInt(0, gCfg.NewlySeenMaxAgeMs) && gCfg.StrictSpawnOnly) continue;
+            if (gCfg.RequireOffscreenApply && IsOnScreenSafe(veh)) continue;
+        }
+
+        ApplyToVehicle(veh);
+        ++applied;
+    }
+
+    if (gPoolCursor >= gPoolSnapshot.size())
+    {
+        gPoolSnapshot.clear();
+        gPoolCursor = 0;
+    }
+}
+
+static void ScanAndApply()
+{
+    RefreshVehicleSnapshot();
+    ProcessVehicleSnapshot();
+}
+
+static void NotifyFeed(const std::string& msg)
+{
+    UI::_SET_NOTIFICATION_TEXT_ENTRY("STRING");
+    UI::_ADD_TEXT_COMPONENT_STRING((char*)msg.c_str());
+    UI::_DRAW_NOTIFICATION(false, false);
+}
+
+static char VkToCharSimple(int vk)
+{
+    if (vk >= 'A' && vk <= 'Z') return (char)vk;
+    if (vk >= '0' && vk <= '9') return (char)vk;
+    return 0;
+}
+
+static std::string ToUpperAscii(const std::string& s)
+{
+    std::string out = s;
+    for (size_t i = 0; i < out.size(); ++i)
+        out[i] = (char)std::toupper((unsigned char)out[i]);
+    return out;
+}
+
+static bool UpdateReloadCheatCode()
+{
+    const DWORD now = GameTimeMs();
+    if (now - gLastCheatKeyMs > 2500)
+        gCheatBuffer.clear();
+
+    for (int vk = '0'; vk <= 'Z'; ++vk)
+    {
+        if (!KeyJustUp(vk))
+            continue;
+
+        char c = VkToCharSimple(vk);
+        if (!c)
+            continue;
+
+        gLastCheatKeyMs = now;
+        if ((int)gCheatBuffer.size() >= 32)
+            gCheatBuffer.erase(gCheatBuffer.begin());
+        gCheatBuffer.push_back((char)std::toupper((unsigned char)c));
+
+        const std::string target = ToUpperAscii(gCfg.ReloadCheatCode);
+        if (!target.empty() && gCheatBuffer.size() >= target.size())
+        {
+            if (gCheatBuffer.compare(gCheatBuffer.size() - target.size(), target.size(), target) == 0)
+            {
+                gCheatBuffer.clear();
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void LoadConfig()
+{
+    const std::string ini = IniPath();
+    gCfg.Enabled = IniBool(ini, "General", "Enabled", true);
+    gCfg.EnableColors = IniBool(ini, "General", "EnableColors", true);
+    gCfg.EnableLiveries = IniBool(ini, "General", "EnableLiveries", true);
+    gCfg.EnableDecals = IniBool(ini, "General", "EnableDecals", true);
+    gCfg.EnableWheelColors = IniBool(ini, "General", "EnableWheelColors", true);
+    gCfg.Radius = IniFloat(ini, "General", "Radius", 170.0f);
+    gCfg.AircraftRadius = IniFloat(ini, "General", "AircraftRadius", 260.0f);
+    gCfg.UpdateIntervalMs = IniInt(ini, "General", "UpdateIntervalMs", 160);
+
+    gCfg.RecentPerModel = IniInt(ini, "Variety", "RecentPerModel", 90);
+    gCfg.AircraftRecentPerModel = IniInt(ini, "Variety", "AircraftRecentPerModel", 50);
+    gCfg.GlobalRecentColorMemory = IniInt(ini, "Variety", "GlobalRecentColorMemory", 140);
+    gCfg.ColorVarietyMultiplier = IniInt(ini, "Variety", "ColorVarietyMultiplier", 240);
+
+    gCfg.AffectOnlyTraffic = IniBool(ini, "Filters", "AffectOnlyTraffic", true);
+    gCfg.SkipEmergency = IniBool(ini, "Filters", "SkipEmergency", true);
+    gCfg.SkipMissionVehicles = IniBool(ini, "Filters", "SkipMissionVehicles", true);
+    gCfg.ServiceVehiclesKeepColors = IniBool(ini, "Filters", "ServiceVehiclesKeepColors", true);
+    gCfg.RequireOffscreenApply = IniBool(ini, "Filters", "RequireOffscreenApply", true);
+    gCfg.StrictSpawnOnly = IniBool(ini, "Filters", "StrictSpawnOnly", true);
+    gCfg.NewlySeenMaxAgeMs = IniInt(ini, "Filters", "NewlySeenMaxAgeMs", 900);
+
+    gCfg.RealisticVehicleColors = IniBool(ini, "Colors", "RealisticVehicleColors", true);
+    gCfg.AllowBrightColors = IniBool(ini, "Colors", "AllowBrightColors", true);
+    gCfg.RainbowMode = IniBool(ini, "Colors", "RainbowMode", false);
+    gCfg.NonRealisticOverusedColorPenalty = IniInt(ini, "Colors", "NonRealisticOverusedColorPenalty", 7);
+    gCfg.NonRealisticRecentPrimaryMemory = IniInt(ini, "Colors", "NonRealisticRecentPrimaryMemory", 120);
+    gCfg.NonRealisticRecentSecondaryMemory = IniInt(ini, "Colors", "NonRealisticRecentSecondaryMemory", 90);
+
+    gCfg.EnablePlanes = IniBool(ini, "Aircraft", "EnablePlanes", true);
+    gCfg.EnableHelicopters = IniBool(ini, "Aircraft", "EnableHelicopters", true);
+    gCfg.AircraftKeepLiveries = IniBool(ini, "Aircraft", "AircraftKeepLiveries", false);
+
+    gCfg.LiveryChancePercent = IniInt(ini, "Liveries", "LiveryChancePercent", 10);
+    gCfg.DecalChancePercent = IniInt(ini, "Liveries", "DecalChancePercent", 14);
+    gCfg.AircraftLiveryChancePercent = IniInt(ini, "Liveries", "AircraftLiveryChancePercent", 18);
+    gCfg.AircraftDecalChancePercent = IniInt(ini, "Liveries", "AircraftDecalChancePercent", 10);
+
+    gCfg.ShowLoadNotification = IniBool(ini, "UI", "ShowLoadNotification", true);
+    gCfg.ReloadCheatCode = IniString(ini, "UI", "ReloadCheatCode", "DTCRELOAD");
+
+    bool logEnabled = IniBool(ini, "Logging", "EnableLog", false);
+    const std::string logPath = LogPathFromIni(ini);
+    gLog.Configure(logEnabled, logPath);
+
+    if (gLog.IsEnabled())
+    {
+        std::ostringstream oss;
+        oss << "Config loaded: Enabled=" << (gCfg.Enabled ? 1 : 0)
+            << " RealisticVehicleColors=" << (gCfg.RealisticVehicleColors ? 1 : 0)
+            << " RainbowMode=" << (gCfg.RainbowMode ? 1 : 0)
+            << " Radius=" << gCfg.Radius
+            << " AircraftRadius=" << gCfg.AircraftRadius
+            << " UpdateIntervalMs=" << gCfg.UpdateIntervalMs
+            << " LogFile=" << logPath;
+        gLog.WriteLine(oss.str());
+    }
+}
+
+void ScriptMain()
+{
+    gStartMs = GameTimeMs();
+    ReserveWorkingSet();
+    LoadConfig();
+    if (gCfg.ShowLoadNotification)
+        NotifyFeed("~b~~h~Dynamic Traffic Colors~s~\nLoaded successfully.");
+
+    DWORD lastUpdate = 0;
+    while (true)
+    {
+        const DWORD now = GameTimeMs();
+
+        if (UpdateReloadCheatCode())
+        {
+            LoadConfig();
+            if (gCfg.ShowLoadNotification)
+                NotifyFeed("~b~~h~Dynamic Traffic Colors~s~\nINI reloaded.");
+        }
+
+        if (now - lastUpdate >= (DWORD)MaxInt(20, gCfg.UpdateIntervalMs))
+        {
+            lastUpdate = now;
+            ScanAndApply();
+        }
+
+        WAIT(0);
+    }
+}
+
