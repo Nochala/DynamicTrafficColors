@@ -2,10 +2,10 @@
 
 > A ScriptHookV plugin that enhances GTA V traffic immersion by increasing the variety of vehicle spawn colors, liveries, & decals.
 
-![Platform](https://img.shields.io/badge/platform-GTA%20V-111111?style=for-the-badge)
-![Type](https://img.shields.io/badge/mod-ScriptHookV-111111?style=for-the-badge)
-![Language](https://img.shields.io/badge/language-C%2B%2B-111111?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-release%20ready-111111?style=for-the-badge)
+![Platform](https://img.shields.io/badge/Platform-GTA%20V-4C8DFF?style=flat&labelColor=4A4A4A&color=4C8DFF)
+![Mod](https://img.shields.io/badge/Mod-ScriptHookV-F0A43A?style=flat&labelColor=4A4A4A&color=F0A43A)
+![Language](https://img.shields.io/badge/Language-C%2B%2B-2E9BFF?style=flat&labelColor=4A4A4A&color=2E9BFF&logo=c%2B%2B&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Release%20Ready-34C759?style=flat&labelColor=4A4A4A&color=34C759)
 
 ---
 
