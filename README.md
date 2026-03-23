@@ -13,10 +13,6 @@
 
 **Dynamic Traffic Colors** is a native **ScriptHookV** mod that improves how traffic vehicles look in **GTA V** by giving them much better paint variety, stronger anti-repetition logic, and more interesting combinations overall.
 
-Vanilla traffic leans too heavily on the same small group of colors, which can make the world feel repetitive over time. This mod fixes that by applying smarter color selection in the background while staying smooth and stable in actual gameplay.
-
-The result is traffic that feels more natural, more diverse, and much more alive.
-
 ---
 
 ## Features
@@ -40,21 +36,6 @@ The result is traffic that feels more natural, more diverse, and much more alive
 * Optional decal variation
 * Optional wheel color variation
 * Optional aircraft support
-
-### Native and lightweight
-
-* Built natively for **ScriptHookV**
-* Designed for smooth background operation
-* INI-configurable
-* In-game INI reload through cheat code
-
----
-
-## Why use this mod?
-
-If you have ever noticed how often vanilla traffic reuses the same blacks, whites, grays, and repeated paint combinations, this mod is meant to solve exactly that.
-
-Instead of letting traffic constantly fall back on the same familiar looks, **Dynamic Traffic Colors** gives the world a much healthier distribution of paints, combinations, and visual variety while still fitting the game.
 
 ---
 
@@ -122,34 +103,6 @@ ReloadCheatCode=DTCRELOAD
 
 ---
 
-## Performance
-
-This mod was designed around smooth background operation and stability.
-
-It uses lightweight scheduling and anti-repetition logic to improve traffic appearance without turning the game into a stuttery mess. The goal is not just more variety, but doing it in a way that still feels seamless during normal gameplay.
-
----
-
-## Compatibility
-
-* **Game:** Grand Theft Auto V
-* **Framework:** ScriptHookV
-* **Type:** Native ASI mod
-
-This mod is intended for users who want improved traffic appearance while staying native to the standard **ScriptHookV** environment.
-
----
-
-## Recommended for
-
-* players who want traffic to feel less repetitive
-* realism-focused setups
-* visual immersion modlists
-* users who want more colorful traffic without going fully unrealistic
-* players who want a true rainbow mode option for fun setups
-
----
-
 ## Credits
 
 Created by **Nochala**
@@ -159,12 +112,6 @@ Created by **Nochala**
 Additional thanks to:
 - The GTA V modding community for documentation, shared research, and reverse-engineering efforts
 - Everyone who reports bugs or provides feedback — your input directly improves future updates
-
----
-
-## Download
-
-Grab the latest release from the **Releases** section of this repository.
 
 ---
 
@@ -181,8 +128,3 @@ If you run into bugs, have suggestions, or want to share screenshots, open an is
 
 [**NexusMods Legacy Page**](https://www.nexusmods.com/gta5/mods/1688)
 
----
-
-## Final note
-
-**Dynamic Traffic Colors** is built to make one of the most repetitive parts of GTA V feel noticeably fresher. If vanilla traffic has ever felt too samey to you, this mod is meant to fix that.
