@@ -139,7 +139,7 @@ public:
     {
         if (!enabled_ || handle_ == INVALID_HANDLE_VALUE) return;
         std::string out = s + "";
-            DWORD written = 0;
+        DWORD written = 0;
         WriteFile(handle_, out.c_str(), (DWORD)out.size(), &written, NULL);
     }
 
@@ -228,15 +228,20 @@ struct Config
 static Config gCfg;
 static Logger gLog;
 
-static const int kScanArraySize = 128;
-static const int kVehiclesExaminedPerTick = 4;
-static const int kMaxAppliesPerTick = 1;
-static const int kRainbowVehiclesExaminedPerTick = 12;
-static const int kRainbowMaxAppliesPerTick = 4;
-static const DWORD kSnapshotRefreshIntervalMs = 4000;
+static const int kScanArraySize = 384;
+static const int kVehiclesExaminedPerTick = 12;
+static const int kMaxAppliesPerTick = 3;
+static const int kRainbowVehiclesExaminedPerTick = 18;
+static const int kRainbowMaxAppliesPerTick = 6;
+static const int kSnapshotBuildVehiclesPerTick = 72;
+static const int kRainbowSnapshotBuildVehiclesPerTick = 108;
+static const size_t kSnapshotLowWatermark = 18;
+static const DWORD kSnapshotRefreshIntervalMs = 1400;
 static const DWORD kRainbowSnapshotRefreshIntervalMs = 900;
-static const float kSnapshotRefreshMoveDistanceSq = 35.0f * 35.0f;
+static const float kSnapshotRefreshMoveDistanceSq = 18.0f * 18.0f;
 static const float kRainbowSnapshotRefreshMoveDistanceSq = 8.0f * 8.0f;
+static const float kNearbyVehicleProtectRadiusSq = 55.0f * 55.0f;
+static const float kNearbyAircraftProtectRadiusSq = 85.0f * 85.0f;
 static const int kRerollAttempts = 16;
 static const DWORD kStartupWarmupMs = 3500;
 static const DWORD kCleanupIntervalMs = 2500;
@@ -441,8 +446,9 @@ struct SeenInfo
 {
     DWORD firstSeen;
     bool applied;
-    SeenInfo() : firstSeen(0), applied(false) {}
-    SeenInfo(DWORD t) : firstSeen(t), applied(false) {}
+    bool protectedNearby;
+    SeenInfo() : firstSeen(0), applied(false), protectedNearby(false) {}
+    SeenInfo(DWORD t, bool protectNearby) : firstSeen(t), applied(false), protectedNearby(protectNearby) {}
 };
 
 static std::unordered_map<int, SeenInfo> gSeen;
@@ -452,14 +458,47 @@ static std::deque<int> gRecentGlobal;
 static std::deque<int> gRecentBuckets;
 static std::deque<int> gRecentCombos;
 static std::vector<int> gPoolSnapshot;
+static std::vector<int> gSnapshotBuildInput;
+static std::vector<int> gSnapshotBuildPriority;
+static std::vector<int> gSnapshotBuildFallback;
 static size_t gPoolCursor = 0;
+static size_t gSnapshotBuildCursor = 0;
 static Vector3 gLastSnapshotPlayerPos = { 0 };
+static Vector3 gSnapshotBuildPlayerPos = { 0 };
 static bool gHasLastSnapshotPlayerPos = false;
+static bool gSnapshotBuildInProgress = false;
 static DWORD gStartMs = 0;
 static DWORD gLastCleanupMs = 0;
 static DWORD gLastSnapshotMs = 0;
 static std::string gCheatBuffer;
 static DWORD gLastCheatKeyMs = 0;
+
+static bool IsBlacklistedVehicleModel(Hash model)
+{
+    static const Hash kPoliceMaverickModel = HashName("polmav");
+    return model == kPoliceMaverickModel;
+}
+
+static bool ShouldProtectNearbyVehicle(Vehicle veh, const Vector3& vehPos, const Vector3& playerPos)
+{
+    const float protectRadiusSq = IsAircraft(veh) ? kNearbyAircraftProtectRadiusSq : kNearbyVehicleProtectRadiusSq;
+    return DistSq(vehPos, playerPos) <= protectRadiusSq || IsOnScreenSafe(veh);
+}
+
+static void RegisterVehicleSeen(Vehicle veh, const Vector3& vehPos, const Vector3& playerPos, DWORD now)
+{
+    SeenInfo& si = gSeen[(int)veh];
+    if (si.firstSeen == 0)
+    {
+        si.firstSeen = now;
+        si.protectedNearby = ShouldProtectNearbyVehicle(veh, vehPos, playerPos);
+        return;
+    }
+
+    if (!si.applied && !si.protectedNearby && ShouldProtectNearbyVehicle(veh, vehPos, playerPos))
+        si.protectedNearby = true;
+}
+
 
 static void PushLimited(std::deque<int>& dq, int value, size_t cap)
 {
@@ -491,6 +530,9 @@ static void ReserveWorkingSet()
     gRecentPrimaryByModel.reserve(256);
     gRecentSecondaryByModel.reserve(256);
     gPoolSnapshot.reserve(kScanArraySize);
+    gSnapshotBuildInput.reserve(kScanArraySize);
+    gSnapshotBuildPriority.reserve(kScanArraySize);
+    gSnapshotBuildFallback.reserve(kScanArraySize);
 }
 
 static void MarkUsed(Hash model, int primary, int secondary, bool aircraft)
@@ -539,6 +581,7 @@ static bool AllowVehicleByFilters(Vehicle veh)
     if (gCfg.SkipEmergency && IsEmergencyVehicle(veh)) return false;
     if (gCfg.SkipMissionVehicles && IsMissionEntityVehicle(veh)) return false;
     Hash model = ENTITY::GET_ENTITY_MODEL(veh);
+    if (IsBlacklistedVehicleModel(model)) return false;
     if (gCfg.ServiceVehiclesKeepColors && IsServiceVehicleModel(model)) return false;
     return true;
 }
@@ -727,14 +770,84 @@ static bool ShouldHandleCategory(Vehicle veh)
     return true;
 }
 
-static void RefreshVehicleSnapshot()
+static size_t RemainingSnapshotVehicles()
 {
-    if (gPoolCursor < gPoolSnapshot.size())
+    return (gPoolCursor < gPoolSnapshot.size()) ? (gPoolSnapshot.size() - gPoolCursor) : 0;
+}
+
+static void StartVehicleSnapshotBuild(const Vector3& playerPos, DWORD now)
+{
+    Vehicle pool[kScanArraySize];
+    const int count = worldGetAllVehicles(pool, kScanArraySize);
+
+    gSnapshotBuildInput.clear();
+    gSnapshotBuildPriority.clear();
+    gSnapshotBuildFallback.clear();
+    gSnapshotBuildCursor = 0;
+
+    if (count > 0)
+        gSnapshotBuildInput.insert(gSnapshotBuildInput.end(), pool, pool + count);
+
+    gSnapshotBuildPlayerPos = playerPos;
+    gSnapshotBuildInProgress = true;
+    gLastSnapshotMs = now;
+    gLastSnapshotPlayerPos = playerPos;
+    gHasLastSnapshotPlayerPos = true;
+}
+
+static void BuildVehicleSnapshotChunk()
+{
+    if (!gSnapshotBuildInProgress) return;
+
+    const DWORD now = GameTimeMs();
+    const int maxScan = gCfg.RainbowMode ? kRainbowSnapshotBuildVehiclesPerTick : kSnapshotBuildVehiclesPerTick;
+    int scanned = 0;
+
+    while (gSnapshotBuildCursor < gSnapshotBuildInput.size() && scanned < maxScan)
+    {
+        Vehicle veh = (Vehicle)gSnapshotBuildInput[gSnapshotBuildCursor++];
+        ++scanned;
+
+        if (!ENTITY::DOES_ENTITY_EXIST(veh)) continue;
+        if (!ShouldHandleCategory(veh)) continue;
+        if (!AllowVehicleByFilters(veh)) continue;
+
+        const Vector3 vehPos = ENTITY::GET_ENTITY_COORDS(veh, true);
+        const float radius = IsAircraft(veh) ? gCfg.AircraftRadius : gCfg.Radius;
+        if (!IsWithinRadiusSq(vehPos, gSnapshotBuildPlayerPos, radius)) continue;
+
+        RegisterVehicleSeen(veh, vehPos, gSnapshotBuildPlayerPos, now);
+
+        SeenInfo& si = gSeen[(int)veh];
+        const bool eligibleOffscreen = !gCfg.RequireOffscreenApply || !IsOnScreenSafe(veh);
+        if (!si.applied && !si.protectedNearby && eligibleOffscreen)
+            gSnapshotBuildPriority.push_back((int)veh);
+        else
+            gSnapshotBuildFallback.push_back((int)veh);
+    }
+
+    if (gSnapshotBuildCursor < gSnapshotBuildInput.size())
         return;
 
+    gPoolSnapshot.clear();
+    gPoolCursor = 0;
+    gPoolSnapshot.insert(gPoolSnapshot.end(), gSnapshotBuildPriority.begin(), gSnapshotBuildPriority.end());
+    gPoolSnapshot.insert(gPoolSnapshot.end(), gSnapshotBuildFallback.begin(), gSnapshotBuildFallback.end());
+
+    gSnapshotBuildInput.clear();
+    gSnapshotBuildPriority.clear();
+    gSnapshotBuildFallback.clear();
+    gSnapshotBuildCursor = 0;
+    gSnapshotBuildInProgress = false;
+    CleanupSeen();
+}
+
+static void RefreshVehicleSnapshot()
+{
     const DWORD now = GameTimeMs();
     if (!gCfg.Enabled) return;
     if (now - gStartMs < kStartupWarmupMs) return;
+    if (gSnapshotBuildInProgress) return;
 
     Ped player = PLAYER::PLAYER_PED_ID();
     if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
@@ -744,21 +857,12 @@ static void RefreshVehicleSnapshot()
     const DWORD refreshIntervalMs = gCfg.RainbowMode ? kRainbowSnapshotRefreshIntervalMs : kSnapshotRefreshIntervalMs;
     const bool movedEnough = !gHasLastSnapshotPlayerPos || DistSq(ppos, gLastSnapshotPlayerPos) >= moveDistanceSq;
     const bool waitedLongEnough = (now - gLastSnapshotMs) >= refreshIntervalMs;
-    if (!movedEnough && !waitedLongEnough)
+    const bool queueLow = RemainingSnapshotVehicles() <= kSnapshotLowWatermark;
+
+    if (!movedEnough && !waitedLongEnough && !queueLow)
         return;
 
-    Vehicle pool[kScanArraySize];
-    const int count = worldGetAllVehicles(pool, kScanArraySize);
-
-    gPoolSnapshot.clear();
-    gPoolCursor = 0;
-    for (int i = 0; i < count; ++i)
-        gPoolSnapshot.push_back((int)pool[i]);
-
-    gLastSnapshotMs = now;
-    gLastSnapshotPlayerPos = ppos;
-    gHasLastSnapshotPlayerPos = true;
-    CleanupSeen();
+    StartVehicleSnapshotBuild(ppos, now);
 }
 
 static void ProcessVehicleSnapshot()
@@ -784,17 +888,23 @@ static void ProcessVehicleSnapshot()
         if (!ShouldHandleCategory(veh)) continue;
         if (!AllowVehicleByFilters(veh)) continue;
 
+        const Vector3 vehPos = ENTITY::GET_ENTITY_COORDS(veh, true);
         const float radius = IsAircraft(veh) ? gCfg.AircraftRadius : gCfg.Radius;
-        if (!IsWithinRadiusSq(ENTITY::GET_ENTITY_COORDS(veh, true), ppos, radius)) continue;
+        if (!IsWithinRadiusSq(vehPos, ppos, radius)) continue;
 
+        RegisterVehicleSeen(veh, vehPos, ppos, now);
         SeenInfo& si = gSeen[(int)veh];
-        if (si.firstSeen == 0) si.firstSeen = now;
 
         if (!gCfg.RainbowMode)
         {
             if (gCfg.StrictSpawnOnly && si.applied) continue;
+            if (si.protectedNearby) continue;
             if ((now - si.firstSeen) > (DWORD)MaxInt(0, gCfg.NewlySeenMaxAgeMs) && gCfg.StrictSpawnOnly) continue;
-            if (gCfg.RequireOffscreenApply && IsOnScreenSafe(veh)) continue;
+            if (gCfg.RequireOffscreenApply && IsOnScreenSafe(veh))
+            {
+                si.protectedNearby = true;
+                continue;
+            }
         }
 
         ApplyToVehicle(veh);
@@ -811,6 +921,7 @@ static void ProcessVehicleSnapshot()
 static void ScanAndApply()
 {
     RefreshVehicleSnapshot();
+    BuildVehicleSnapshotChunk();
     ProcessVehicleSnapshot();
 }
 
