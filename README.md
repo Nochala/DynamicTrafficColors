@@ -1,8 +1,9 @@
 # Dynamic Traffic Colors
 
 A ScriptHookV plugin that enhances GTA V traffic immersion by increasing the variety of vehicle spawn colors, liveries, & decals.
+
 [![Latest Release](https://img.shields.io/github/v/release/Nochala/DynamicTrafficColors?include_prereleases&label=Latest%20Release)](https://github.com/Nochal/DynamicTrafficColors/releases/latest)
-![Platform](https://img.shields.io/badge/Platform-GTA%20V-4C8DFF?style=flat&labelColor=4A4A4A&color=4C8DFF)
+![Platform](https://img.shields.io/badge/Platform-GTA%20V-4C8DFF?style=flat&labelColor=4A4A4A&color=4C8DFJ)
 ![Mod](https://img.shields.io/badge/Mod-ScriptHookV-F0A43A?style=flat&labelColor=4A4A4A&color=F0A43A)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B-2E9BFF?style=flat&labelColor=4A4A4A&color=2E9BFF&logo=c%2B%2B&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-Release%20Ready-34C759?style=flat&labelColor=4A4A4A&color=34C759)
