@@ -172,6 +172,7 @@ struct Config
     int NewlySeenMaxAgeMs;
     bool RealisticVehicleColors;
     bool AllowBrightColors;
+    bool TwoToneColors;
     bool RainbowMode;
     int ColorVarietyMultiplier;
     int NonRealisticRecentPrimaryMemory;
@@ -210,6 +211,7 @@ struct Config
         NewlySeenMaxAgeMs = 900;
         RealisticVehicleColors = true;
         AllowBrightColors = true;
+        TwoToneColors = true;
         RainbowMode = false;
         ColorVarietyMultiplier = 240;
         NonRealisticRecentPrimaryMemory = 120;
@@ -288,6 +290,7 @@ static const float kNearbyAircraftProtectRadiusSq = 85.0f * 85.0f;
 static const float kVisibleSpawnApplyMinDistanceSq = 45.0f * 45.0f;
 static const float kVisibleParkedApplyMinDistanceSq = 65.0f * 65.0f;
 static const DWORD kVisibleSpawnApplyMaxAgeMs = 320;
+static const float kVisibleApplyPlayerSpeedMax = 4.5f;
 static const int kRerollAttempts = 16;
 static const DWORD kStartupWarmupMs = 3500;
 static const DWORD kCleanupIntervalMs = 2500;
@@ -308,6 +311,16 @@ static float DistSq(const Vector3& a, const Vector3& b)
 static bool IsWithinRadiusSq(const Vector3& a, const Vector3& b, float radius)
 {
     return DistSq(a, b) <= (radius * radius);
+}
+static bool IsPlayerMovingTooFastForVisibleApply()
+{
+    Ped playerPed = PLAYER::PLAYER_PED_ID();
+    if (!ENTITY::DOES_ENTITY_EXIST(playerPed))
+        return false;
+
+    const Vehicle playerVehicle = PED::GET_VEHICLE_PED_IS_IN(playerPed, false);
+    const Entity speedEntity = (playerVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(playerVehicle)) ? (Entity)playerVehicle : (Entity)playerPed;
+    return ENTITY::GET_ENTITY_SPEED(speedEntity) > kVisibleApplyPlayerSpeedMax;
 }
 static bool ChancePass(int pct)
 {
@@ -441,43 +454,223 @@ struct WeightedPalette
 
 static void AppendRange(std::vector<int>& out, const int* vals, size_t count) { out.insert(out.end(), vals, vals + count); }
 
+static bool IsGloballyBlacklistedColor(int color)
+{
+    switch (color)
+    {
+    case 11:
+    case 12:
+    case 13:
+    case 15:
+    case 21:
+    case 24:
+    case 36:
+    case 38:
+    case 41:
+    case 42:
+    case 47:
+    case 48:
+    case 58:
+    case 59:
+    case 71:
+    case 72:
+    case 81:
+    case 86:
+    case 87:
+    case 113:
+    case 114:
+    case 115:
+    case 116:
+    case 117:
+    case 118:
+    case 119:
+    case 120:
+    case 126:
+    case 127:
+    case 141:
+    case 142:
+    case 143:
+    case 145:
+    case 146:
+    case 148:
+    case 149:
+    case 150:
+    case 152:
+    case 153:
+    case 154:
+    case 155:
+    case 156:
+    case 157:
+    case 158:
+    case 159:
+    case 160:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool VectorContainsColor(const std::vector<int>& values, int color)
+{
+    return std::find(values.begin(), values.end(), color) != values.end();
+}
+
+static bool IsRealisticRestrictedColor(int color)
+{
+    switch (color)
+    {
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 35:
+    case 40:
+    case 43:
+    case 44:
+    case 46:
+    case 52:
+    case 53:
+    case 56:
+    case 57:
+    case 63:
+    case 64:
+    case 67:
+    case 68:
+    case 69:
+    case 70:
+    case 73:
+    case 74:
+    case 75:
+    case 76:
+    case 77:
+    case 78:
+    case 79:
+    case 80:
+    case 82:
+    case 83:
+    case 84:
+    case 85:
+    case 88:
+    case 89:
+    case 90:
+    case 91:
+    case 92:
+    case 94:
+    case 97:
+    case 98:
+    case 99:
+    case 100:
+    case 101:
+    case 102:
+    case 103:
+    case 104:
+    case 105:
+    case 107:
+    case 108:
+    case 109:
+    case 110:
+    case 112:
+    case 117:
+    case 125:
+    case 128:
+    case 129:
+    case 130:
+    case 135:
+    case 147:
+    case 151:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void RemoveBlacklistedColors(std::vector<int>& values)
+{
+    values.erase(std::remove_if(values.begin(), values.end(),
+        [](int color) { return IsGloballyBlacklistedColor(color); }),
+        values.end());
+}
+
+static void RemoveRealisticRestrictedColors(std::vector<int>& values)
+{
+    values.erase(std::remove_if(values.begin(), values.end(),
+        [](int color) { return IsGloballyBlacklistedColor(color) || IsRealisticRestrictedColor(color); }),
+        values.end());
+}
+
+static int PickFromVector(const std::vector<int>& values, int fallback)
+{
+    if (values.empty()) return fallback;
+    return values[RandInt(0, (int)values.size())];
+}
+
 static WeightedPalette BuildRealisticPalette()
 {
     WeightedPalette p;
-    const int neutrals[] = {
-        0,1,2,3,4,5,27,111,112,121,122,123,124,131,132,133,134,135,136,137,138,139,140,147
-    };
-    const int blues[] = {
-        54,60,61,62,63,64,65,66,67,68,69,70,73,74,75,76,77,78,79,80,82,83,84,85
-    };
-    const int reds[] = {
-        27,28,29,30,31,32,33,34,35,39,40,43,44,46
-    };
-    const int greens[] = {
-        49,50,51,52,53,55,56,57,92,125,128,129,130,151
-    };
-    const int warm[] = {
-        88,89,90,91,94,95,96,97,98,99,100,101,102,103,104,105,107,108,109,110
-    };
-    const int unusual[] = {
-        41,42,47,48,58,59,71,72,81,86,87,113,114,115,116,117,118,119,120,126,127,141,142,143,145,146,148,149,150,152,153,154,155,156,157,158,159,160
-    };
-    const int bright[] = { 15, 53, 64, 73, 88, 89, 112, 135 };
 
-    AppendRange(p.neutrals, neutrals, sizeof(neutrals) / sizeof(neutrals[0]));
-    AppendRange(p.blues, blues, sizeof(blues) / sizeof(blues[0]));
-    AppendRange(p.reds, reds, sizeof(reds) / sizeof(reds[0]));
-    AppendRange(p.greens, greens, sizeof(greens) / sizeof(greens[0]));
-    AppendRange(p.warm, warm, sizeof(warm) / sizeof(warm[0]));
-    AppendRange(p.unusual, unusual, sizeof(unusual) / sizeof(unusual[0]));
-    AppendRange(p.bright, bright, sizeof(bright) / sizeof(bright[0]));
+    // Extremely conservative factory-style palette for realistic traffic.
+    // Keep realistic mode focused on the colors that dominate normal road traffic:
+    // black, gray, silver, white, off-white, a very small amount of deep blue,
+    // and an even smaller amount of muted beige / tan.
+    const int ultraCommonNeutrals[] = {
+        0,1,2,3,4,5,6,7,8,9,10,17,18,19,22,23,25,111,112,121,122,131,132,134,156
+    };
+    const int commonNeutrals[] = {
+        0,1,2,3,4,5,6,7,8,9,10,16,17,18,19,20,22,23,25,26,111,112,121,122,131,132,134,141,146,156
+    };
+    const int uncommonBlues[] = {
+        61,62,66,69,75,76,82,84,141,146
+    };
+    const int rareEarthTones[] = {
+        90,93,95,99,105,106,113,116,129,144,153,154
+    };
 
-    for (int v : p.neutrals) { for (int i = 0; i < 3; ++i) p.ultraCommon.push_back(v); for (int i = 0; i < 2; ++i) p.common.push_back(v); }
-    for (int v : p.blues) { for (int i = 0; i < 4; ++i) p.common.push_back(v); for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); }
-    for (int v : p.reds) { for (int i = 0; i < 1; ++i) p.common.push_back(v); for (int i = 0; i < 1; ++i) p.uncommon.push_back(v); }
-    for (int v : p.greens) { for (int i = 0; i < 3; ++i) p.common.push_back(v); for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); }
-    for (int v : p.warm) { for (int i = 0; i < 3; ++i) p.uncommon.push_back(v); for (int i = 0; i < 1; ++i) p.rare.push_back(v); }
-    for (int v : p.unusual) { for (int i = 0; i < 3; ++i) p.rare.push_back(v); }
+    AppendRange(p.neutrals, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
+    AppendRange(p.neutrals, commonNeutrals, sizeof(commonNeutrals) / sizeof(commonNeutrals[0]));
+    AppendRange(p.blues, uncommonBlues, sizeof(uncommonBlues) / sizeof(uncommonBlues[0]));
+    AppendRange(p.warm, rareEarthTones, sizeof(rareEarthTones) / sizeof(rareEarthTones[0]));
+
+    RemoveRealisticRestrictedColors(p.neutrals);
+    RemoveRealisticRestrictedColors(p.blues);
+    RemoveRealisticRestrictedColors(p.warm);
+
+    for (int v : ultraCommonNeutrals)
+    {
+        if (IsGloballyBlacklistedColor(v) || IsRealisticRestrictedColor(v)) continue;
+        for (int i = 0; i < 18; ++i) p.ultraCommon.push_back(v);
+        for (int i = 0; i < 12; ++i) p.common.push_back(v);
+        for (int i = 0; i < 3; ++i) p.uncommon.push_back(v);
+    }
+
+    for (int v : commonNeutrals)
+    {
+        if (IsGloballyBlacklistedColor(v) || IsRealisticRestrictedColor(v)) continue;
+        for (int i = 0; i < 6; ++i) p.common.push_back(v);
+        for (int i = 0; i < 2; ++i) p.uncommon.push_back(v);
+    }
+
+    for (int v : uncommonBlues)
+    {
+        if (IsGloballyBlacklistedColor(v) || IsRealisticRestrictedColor(v)) continue;
+        for (int i = 0; i < 2; ++i) p.uncommon.push_back(v);
+        p.rare.push_back(v);
+    }
+
+    for (int v : rareEarthTones)
+    {
+        if (IsGloballyBlacklistedColor(v) || IsRealisticRestrictedColor(v)) continue;
+        p.rare.push_back(v);
+    }
+
+    RemoveRealisticRestrictedColors(p.ultraCommon);
+    RemoveRealisticRestrictedColors(p.common);
+    RemoveRealisticRestrictedColors(p.uncommon);
+    RemoveRealisticRestrictedColors(p.rare);
+
+    p.reds.clear();
+    p.greens.clear();
+    p.unusual.clear();
+    p.bright.clear();
     return p;
 }
 
@@ -495,13 +688,19 @@ static WeightedPalette BuildArcadePalette()
     const int bright[] = { 11,12,13,15,21,24,36,38,47,53,58,64,72,73,81,88,89,112,117,135,145,146,150,151,152,157,160 };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
     {
-        p.common.push_back(all[i]);
-        p.uncommon.push_back(all[i]);
+        if (!IsGloballyBlacklistedColor(all[i]))
+        {
+            p.common.push_back(all[i]);
+            p.uncommon.push_back(all[i]);
+        }
     }
     for (size_t i = 0; i < sizeof(bright) / sizeof(bright[0]); ++i)
     {
-        p.rare.push_back(bright[i]);
-        p.bright.push_back(bright[i]);
+        if (!IsGloballyBlacklistedColor(bright[i]))
+        {
+            p.rare.push_back(bright[i]);
+            p.bright.push_back(bright[i]);
+        }
     }
     return p;
 }
@@ -546,10 +745,10 @@ static BucketLookup gArcadeBucketLookup = BuildBucketLookup(gArcadePalette);
 static const std::vector<int>& PickColorPool(const WeightedPalette& p, bool allowBright)
 {
     const int roll = RandInt(0, 100);
-    if (allowBright && roll >= 95 && !p.bright.empty()) return p.bright;
-    if (roll < 16 && !p.ultraCommon.empty()) return p.ultraCommon;
-    if (roll < 42 && !p.common.empty()) return p.common;
-    if (roll < 78 && !p.uncommon.empty()) return p.uncommon;
+    if (allowBright && roll >= 97 && !p.bright.empty()) return p.bright;
+    if (roll < 28 && !p.ultraCommon.empty()) return p.ultraCommon;
+    if (roll < 66 && !p.common.empty()) return p.common;
+    if (roll < 93 && !p.uncommon.empty()) return p.uncommon;
     if (!p.rare.empty()) return p.rare;
     if (!p.common.empty()) return p.common;
     return p.uncommon;
@@ -586,22 +785,54 @@ static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int var
     const std::vector<int>& pool = PickColorPool(p, allowBright);
     if (pool.empty()) return 0;
 
-    int bestColor = pool[RandInt(0, (int)pool.size())];
+    const bool realisticPalette = (&p == &gRealisticPalette);
+    int bestColor = 0;
     int bestScore = -999999;
+    bool found = false;
 
-    for (int i = 0; i < kRerollAttempts; ++i)
+    for (int i = 0; i < MaxInt(kRerollAttempts, 30); ++i)
     {
         int color = pool[RandInt(0, (int)pool.size())];
+        if (IsGloballyBlacklistedColor(color))
+            continue;
+        if (realisticPalette && IsRealisticRestrictedColor(color))
+            continue;
+
         int bucket = BucketId(p, color);
         int bucketHits = CountBucketInRecent(p, recentBuckets, bucket);
         int score = RandInt(0, 1000) - bucketHits * varietyMultiplier;
-        if (score > bestScore)
+
+        if (realisticPalette)
+        {
+            if (bucket == 0) score += 420;
+            else if (bucket == 1) score -= 20;
+            else if (bucket == 2) score -= 260;
+            else if (bucket == 3) score -= 320;
+            else if (bucket == 4) score -= 360;
+            else score -= 420;
+        }
+
+        if (!found || score > bestScore)
         {
             bestScore = score;
             bestColor = color;
+            found = true;
         }
     }
-    return bestColor;
+
+    if (found)
+        return bestColor;
+
+    for (size_t i = 0; i < pool.size(); ++i)
+    {
+        if (IsGloballyBlacklistedColor(pool[i]))
+            continue;
+        if (realisticPalette && IsRealisticRestrictedColor(pool[i]))
+            continue;
+        return pool[i];
+    }
+
+    return 0;
 }
 
 struct SeenInfo
@@ -621,6 +852,7 @@ static std::unordered_map<unsigned int, std::deque<int> > gRecentSecondaryByMode
 static std::deque<int> gRecentGlobal;
 static std::deque<int> gRecentBuckets;
 static std::deque<int> gRecentCombos;
+static std::unordered_map<int, DWORD> gCharacterSwitchProtectedVehicles;
 static std::vector<int> gPoolSnapshot;
 static std::vector<int> gSnapshotBuildInput;
 static std::vector<int> gSnapshotBuildPriority;
@@ -635,6 +867,8 @@ static bool gSnapshotBuildInProgress = false;
 static DWORD gStartMs = 0;
 static DWORD gLastCleanupMs = 0;
 static DWORD gLastSnapshotMs = 0;
+static Ped gLastObservedPlayerPed = 0;
+static Vehicle gLastObservedPlayerVehicle = 0;
 static std::string gCheatBuffer;
 static DWORD gLastCheatKeyMs = 0;
 
@@ -642,6 +876,84 @@ static bool IsBlacklistedVehicleModel(Hash model)
 {
     static const Hash kPoliceMaverickModel = HashName("polmav");
     return model == kPoliceMaverickModel;
+}
+
+
+static void ResetVehicleSnapshotState()
+{
+    gPoolSnapshot.clear();
+    gSnapshotBuildInput.clear();
+    gSnapshotBuildPriority.clear();
+    gSnapshotBuildUrgentVisible.clear();
+    gSnapshotBuildFallback.clear();
+    gPoolCursor = 0;
+    gSnapshotBuildCursor = 0;
+    gSnapshotBuildInProgress = false;
+    gHasLastSnapshotPlayerPos = false;
+    gLastSnapshotMs = 0;
+}
+
+static void ProtectVehicleFromCharacterSwitch(Vehicle veh, DWORD now)
+{
+    if (!IsValidVehicleHandle(veh)) return;
+
+    gCharacterSwitchProtectedVehicles[(int)veh] = now;
+
+    SeenInfo& si = gSeen[(int)veh];
+    const Hash model = ENTITY::GET_ENTITY_MODEL(veh);
+    if (si.firstSeen == 0 || si.model != model)
+        si.firstSeen = now;
+
+    si.lastSeen = now;
+    si.model = model;
+    si.applied = true;
+    si.protectedNearby = true;
+}
+
+static bool IsCharacterSwitchProtectedVehicle(Vehicle veh)
+{
+    return veh != 0 && gCharacterSwitchProtectedVehicles.find((int)veh) != gCharacterSwitchProtectedVehicles.end();
+}
+
+static void UpdateCharacterSwitchProtection()
+{
+    Ped playerPed = PLAYER::PLAYER_PED_ID();
+    if (!ENTITY::DOES_ENTITY_EXIST(playerPed))
+        return;
+
+    const DWORD now = GameTimeMs();
+    const Vehicle currentVehicle = PED::GET_VEHICLE_PED_IS_IN(playerPed, false);
+    const bool switchedCharacter = gLastObservedPlayerPed != 0 && gLastObservedPlayerPed != playerPed;
+
+    if (switchedCharacter)
+    {
+        ProtectVehicleFromCharacterSwitch(gLastObservedPlayerVehicle, now);
+        ProtectVehicleFromCharacterSwitch(currentVehicle, now);
+        ResetVehicleSnapshotState();
+
+        if (gLog.IsEnabled())
+        {
+            std::ostringstream oss;
+            oss << "Character switch detected; protecting previousVehicle=" << (int)gLastObservedPlayerVehicle
+                << " currentVehicle=" << (int)currentVehicle;
+            gLog.WriteLine(oss.str());
+        }
+    }
+
+    if (currentVehicle != 0)
+    {
+        gLastObservedPlayerVehicle = currentVehicle;
+
+        std::unordered_map<int, DWORD>::iterator it = gCharacterSwitchProtectedVehicles.find((int)currentVehicle);
+        if (it != gCharacterSwitchProtectedVehicles.end())
+            it->second = now;
+    }
+    else if (gLastObservedPlayerVehicle != 0 && !IsValidVehicleHandle(gLastObservedPlayerVehicle))
+    {
+        gLastObservedPlayerVehicle = 0;
+    }
+
+    gLastObservedPlayerPed = playerPed;
 }
 
 static bool ShouldProtectNearbyVehicle(const VehicleRuntimeInfo& info, const Vector3& playerPos)
@@ -675,6 +987,7 @@ static bool IsFreshVisibleSpawnCandidate(const VehicleRuntimeInfo& info, const S
 {
     if (info.hasPlayerDriver || !info.onScreenKnown || !info.onScreen || !info.hasCoords) return false;
     if (si.applied || si.protectedNearby) return false;
+    if (IsPlayerMovingTooFastForVisibleApply()) return false;
 
     const DWORD visibleAgeLimit = (DWORD)MaxInt(120, MinInt(gCfg.NewlySeenMaxAgeMs, (int)kVisibleSpawnApplyMaxAgeMs));
     if ((now - si.firstSeen) > visibleAgeLimit)
@@ -756,6 +1069,20 @@ static void CleanupSeen()
 
     std::vector<int> dead;
     dead.reserve(gSeen.size());
+    std::vector<int> deadProtected;
+    deadProtected.reserve(gCharacterSwitchProtectedVehicles.size());
+    for (std::unordered_map<int, DWORD>::iterator it = gCharacterSwitchProtectedVehicles.begin(); it != gCharacterSwitchProtectedVehicles.end(); ++it)
+    {
+        const int handle = it->first;
+        if (!ENTITY::DOES_ENTITY_EXIST(handle) || ENTITY::IS_ENTITY_A_VEHICLE(handle) == 0)
+            deadProtected.push_back(handle);
+    }
+    for (size_t i = 0; i < deadProtected.size(); ++i)
+        gCharacterSwitchProtectedVehicles.erase(deadProtected[i]);
+
+    if (gLastObservedPlayerVehicle != 0 && !IsValidVehicleHandle(gLastObservedPlayerVehicle))
+        gLastObservedPlayerVehicle = 0;
+
     for (std::unordered_map<int, SeenInfo>::iterator it = gSeen.begin(); it != gSeen.end(); ++it)
     {
         int handle = it->first;
@@ -788,9 +1115,10 @@ static bool IsTrafficVehicle(const VehicleRuntimeInfo& info)
     return true;
 }
 
-static bool AllowVehicleByFilters(const VehicleRuntimeInfo& info)
+static bool AllowVehicleByFilters(Vehicle veh, const VehicleRuntimeInfo& info)
 {
     if (!info.driveable) return false;
+    if (IsCharacterSwitchProtectedVehicle(veh)) return false;
     if (IsLikelyPlayerOwnedOrPersistedVehicle(info)) return false;
     if (!IsTrafficVehicle(info)) return false;
     if (gCfg.SkipEmergency && info.isEmergency) return false;
@@ -798,6 +1126,71 @@ static bool AllowVehicleByFilters(const VehicleRuntimeInfo& info)
     if (IsBlacklistedVehicleModel(info.model)) return false;
     if (gCfg.ServiceVehiclesKeepColors && IsServiceVehicleModel(info.model)) return false;
     return true;
+}
+
+static const std::vector<int>& ColorsForBucket(const WeightedPalette& p, int bucket)
+{
+    switch (bucket)
+    {
+    case 0: return p.neutrals;
+    case 1: return p.blues;
+    case 2: return p.reds;
+    case 3: return p.greens;
+    case 4: return p.warm;
+    case 5: return p.unusual;
+    default: return p.neutrals;
+    }
+}
+
+static int ScoreRealisticTwoTonePair(int primaryBucket, int secondaryBucket, bool sameColor)
+{
+    if (sameColor)
+        return 900;
+
+    if (secondaryBucket == 0)
+        return 40;
+
+    return -500;
+}
+
+static int PickRealisticSecondaryColor(const WeightedPalette& palette, int primary, const std::deque<int>& recentSecondary)
+{
+    const int primaryBucket = BucketId(palette, primary);
+
+    // In realistic mode, almost every vehicle should remain single-color.
+    if (RandInt(0, 100) < 98)
+        return primary;
+
+    int bestColor = primary;
+    int bestScore = -999999;
+
+    for (size_t i = 0; i < palette.neutrals.size(); ++i)
+    {
+        const int candidate = palette.neutrals[i];
+        if (candidate == primary) continue;
+        if (IsGloballyBlacklistedColor(candidate) || IsRealisticRestrictedColor(candidate)) continue;
+
+        const int bucket = BucketId(palette, candidate);
+        const int combo = PackCombo(primary, candidate);
+
+        int score = RandInt(0, 40);
+        score += ScoreRealisticTwoTonePair(primaryBucket, bucket, candidate == primary);
+        score -= CountInRecent(recentSecondary, candidate) * MaxInt(6, gCfg.NonRealisticOverusedColorPenalty * 2);
+        score -= CountInRecent(gRecentGlobal, candidate) * 5;
+        score -= CountComboInRecent(gRecentCombos, combo) * 140;
+
+        if (RecentContains(recentSecondary, candidate)) score -= 60;
+        if (RecentContains(gRecentGlobal, candidate)) score -= 25;
+        if (RecentContainsCombo(gRecentCombos, combo)) score -= 200;
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestColor = candidate;
+        }
+    }
+
+    return bestColor;
 }
 
 static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int& outSecondary)
@@ -811,22 +1204,47 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
 
     for (int i = 0; i < tries; ++i)
     {
-        const int p = PickBucketedColor(palette, gCfg.AllowBrightColors || gCfg.RainbowMode, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
-        const int s = PickBucketedColor(palette, gCfg.AllowBrightColors || gCfg.RainbowMode, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+        const bool allowBrightSelection = gCfg.RainbowMode || (!gCfg.RealisticVehicleColors && gCfg.AllowBrightColors);
+        const int p = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+
+        int s = p;
+        if (gCfg.TwoToneColors)
+        {
+            if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
+                s = PickRealisticSecondaryColor(palette, p, recentSecondary);
+            else
+                s = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+        }
+
         const int primaryBucket = BucketId(palette, p);
         const int secondaryBucket = BucketId(palette, s);
         const int combo = PackCombo(p, s);
-        const bool preferContrast = gCfg.RainbowMode || RandInt(0, 100) < (gCfg.RealisticVehicleColors ? 42 : 68);
+        const bool sameColor = p == s;
+        const bool preferContrast =
+            gCfg.RainbowMode ||
+            (gCfg.TwoToneColors && (!gCfg.RealisticVehicleColors ? (RandInt(0, 100) < 68) : false));
 
         int score = RandInt(0, 700);
 
-        if (p != s) score += 95;
-        else score -= 75;
+        if (!gCfg.TwoToneColors)
+        {
+            if (sameColor) score += 120;
+        }
+        else if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
+        {
+            if (sameColor) score += 520;
+            else score -= 180;
+        }
+        else
+        {
+            if (sameColor) score -= 75;
+            else score += 95;
+        }
 
         if (preferContrast)
         {
-            if (primaryBucket != secondaryBucket) score += 125;
-            else score -= 70;
+            if (primaryBucket != secondaryBucket) score += (gCfg.RealisticVehicleColors && !gCfg.RainbowMode) ? 25 : 125;
+            else score -= (gCfg.RealisticVehicleColors && !gCfg.RainbowMode) ? 20 : 70;
         }
         else
         {
@@ -835,18 +1253,27 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
 
         if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
         {
-            if (primaryBucket == 0) score -= 55;
-            if (secondaryBucket == 0) score -= 35;
-            if (primaryBucket == 2) score -= 40;
-            if (secondaryBucket == 2) score -= 22;
-            if (primaryBucket == 0 && secondaryBucket == 0) score -= 85;
-            if ((primaryBucket == 0 && secondaryBucket != 0) || (primaryBucket != 0 && secondaryBucket == 0)) score += 38;
-            if (primaryBucket == 1) score += 22;
-            if (secondaryBucket == 1) score += 18;
-            if (primaryBucket == 3) score += 18;
-            if (secondaryBucket == 3) score += 16;
-            if (primaryBucket >= 4) score += 26;
-            if (secondaryBucket >= 4) score += 28;
+            if (primaryBucket == 0) score += 260;
+            if (secondaryBucket == 0) score += 320;
+            if (primaryBucket == 1) score += 6;
+            if (secondaryBucket == 1) score -= 8;
+            if (primaryBucket == 2) score -= 180;
+            if (secondaryBucket == 2) score -= 240;
+            if (primaryBucket == 3) score -= 260;
+            if (secondaryBucket == 3) score -= 320;
+            if (primaryBucket == 4) score -= 320;
+            if (secondaryBucket == 4) score -= 380;
+            if (primaryBucket >= 5) score -= 420;
+            if (secondaryBucket >= 5) score -= 460;
+
+            if (primaryBucket == 0 && secondaryBucket == 0) score += 180;
+            if ((primaryBucket == 0 && secondaryBucket != 0) || (primaryBucket != 0 && secondaryBucket == 0)) score += 20;
+            if (primaryBucket != 0 && secondaryBucket != 0 && primaryBucket != secondaryBucket) score -= 260;
+
+            if (gCfg.TwoToneColors)
+                score += ScoreRealisticTwoTonePair(primaryBucket, secondaryBucket, sameColor);
+            else if (sameColor)
+                score += 220;
         }
 
         score -= CountInRecent(recentPrimary, p) * MaxInt(8, gCfg.NonRealisticOverusedColorPenalty * 3);
@@ -886,6 +1313,7 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
     outSecondary = bestS;
     return true;
 }
+
 
 static bool TryApplyLivery(Vehicle veh, bool aircraft)
 {
@@ -934,7 +1362,7 @@ static bool TryApplyDecal(Vehicle veh, bool aircraft)
 
 static void ApplyToVehicle(Vehicle veh, const VehicleRuntimeInfo& info)
 {
-    if (!AllowVehicleByFilters(info)) return;
+    if (!AllowVehicleByFilters(veh, info)) return;
     const bool aircraft = info.isAircraft;
 
     int primary = 0, secondary = 0;
@@ -1044,7 +1472,7 @@ static void BuildVehicleSnapshotChunk()
         VehicleRuntimeInfo info;
         if (!PopulateVehicleRuntimeInfo(veh, ctx, info, true, true)) continue;
         if (!ShouldHandleCategory(info)) continue;
-        if (!AllowVehicleByFilters(info)) continue;
+        if (!AllowVehicleByFilters(veh, info)) continue;
 
         const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
         if (!IsWithinRadiusSq(info.coords, gSnapshotBuildPlayerPos, radius)) continue;
@@ -1124,7 +1552,7 @@ static void ProcessVehicleSnapshot()
         VehicleRuntimeInfo info;
         if (!PopulateVehicleRuntimeInfo(veh, ctx, info, true, true)) continue;
         if (!ShouldHandleCategory(info)) continue;
-        if (!AllowVehicleByFilters(info)) continue;
+        if (!AllowVehicleByFilters(veh, info)) continue;
 
         SeenInfo& si = gSeen[(int)veh];
         if (!gCfg.RainbowMode)
@@ -1154,6 +1582,7 @@ static void ProcessVehicleSnapshot()
 
 static void ScanAndApply()
 {
+    UpdateCharacterSwitchProtection();
     RefreshVehicleSnapshot();
     BuildVehicleSnapshotChunk();
     ProcessVehicleSnapshot();
@@ -1243,6 +1672,7 @@ static void LoadConfig()
 
     gCfg.RealisticVehicleColors = IniBool(ini, "Colors", "RealisticVehicleColors", true);
     gCfg.AllowBrightColors = IniBool(ini, "Colors", "AllowBrightColors", true);
+    gCfg.TwoToneColors = IniBool(ini, "Colors", "TwoToneColors", true);
     gCfg.RainbowMode = IniBool(ini, "Colors", "RainbowMode", false);
     gCfg.NonRealisticOverusedColorPenalty = IniInt(ini, "Colors", "NonRealisticOverusedColorPenalty", 7);
     gCfg.NonRealisticRecentPrimaryMemory = IniInt(ini, "Colors", "NonRealisticRecentPrimaryMemory", 120);
@@ -1269,6 +1699,7 @@ static void LoadConfig()
         std::ostringstream oss;
         oss << "Config loaded: Enabled=" << (gCfg.Enabled ? 1 : 0)
             << " RealisticVehicleColors=" << (gCfg.RealisticVehicleColors ? 1 : 0)
+            << " TwoToneColors=" << (gCfg.TwoToneColors ? 1 : 0)
             << " RainbowMode=" << (gCfg.RainbowMode ? 1 : 0)
             << " Radius=" << gCfg.Radius
             << " AircraftRadius=" << gCfg.AircraftRadius
