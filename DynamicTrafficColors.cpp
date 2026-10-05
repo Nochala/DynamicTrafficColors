@@ -26,23 +26,27 @@
 
 // ========== VEHICLE REGISTRY / CANDIDATE PROCESSING ==========
 static const int kScanArraySize = 1024;
-static const int kVehiclesExaminedPerTick = 12;
-static const int kMaxAppliesPerTick = 3;
-static const int kRainbowVehiclesExaminedPerTick = 18;
-static const int kRainbowMaxAppliesPerTick = 6;
-static const DWORD kVehicleCensusIntervalMs = 250;
-static const DWORD kRainbowVehicleCensusIntervalMs = 160;
+static const int kVehiclesExaminedPerTick = 28;
+static const int kMaxAppliesPerTick = 8;
+static const int kFastVehiclesExaminedPerTick = 48;
+static const int kFastMaxAppliesPerTick = 16;
+static const int kRainbowVehiclesExaminedPerTick = 36;
+static const int kRainbowMaxAppliesPerTick = 12;
+static const DWORD kVehicleCensusIntervalMs = 110;
+static const DWORD kFastVehicleCensusIntervalMs = 55;
+static const DWORD kFastUpdateIntervalMs = 75;
+static const DWORD kVeryFastUpdateIntervalMs = 55;
+static const DWORD kRainbowVehicleCensusIntervalMs = 120;
 static const DWORD kRainbowReapplyIntervalMs = 900;
 static const DWORD kRejectedVehicleRecheckMs = 750;
 static const DWORD kOutsideRadiusRecheckMs = 250;
-static const float kNearbyVehicleProtectRadiusSq = 55.0f * 55.0f;
-static const float kNearbyAircraftProtectRadiusSq = 85.0f * 85.0f;
-static const float kVisibleSpawnApplyMinDistanceSq = 45.0f * 45.0f;
-static const float kVisibleParkedApplyMinDistanceSq = 65.0f * 65.0f;
-static const DWORD kVisibleSpawnApplyMaxAgeMs = 320;
-static const float kVisibleApplyPlayerSpeedMax = 4.5f;
+static const DWORD kVisibleVehicleRecheckMs = 80;
+static const float kVisibleSpawnApplyMinDistance = 45.0f;
+static const float kVisibleParkedApplyMinDistance = 65.0f;
+static const float kFastTravelSpeed = 12.0f;
+static const float kVeryFastTravelSpeed = 25.0f;
 static const int kRerollAttempts = 16;
-static const DWORD kStartupWarmupMs = 3500;
+static const DWORD kStartupWarmupMs = 750;
 static const DWORD kCleanupIntervalMs = 2500;
 static const DWORD kSeenTtlMs = 18000;
 static const int kVehicleModTypeLivery = 48;
@@ -182,6 +186,7 @@ struct Config
     float Radius;
     float AircraftRadius;
     int UpdateIntervalMs;
+    bool ProcessAllLoadedVehicles;
     int RecentPerModel;
     int AircraftRecentPerModel;
     int GlobalRecentColorMemory;
@@ -221,6 +226,7 @@ struct Config
         Radius = 170.0f;
         AircraftRadius = 260.0f;
         UpdateIntervalMs = 170;
+        ProcessAllLoadedVehicles = true;
         RecentPerModel = 90;
         AircraftRecentPerModel = 50;
         GlobalRecentColorMemory = 140;
@@ -287,10 +293,11 @@ struct VehicleEvalContext
     Ped playerPed;
     Vehicle playerVehicle;
     Vector3 playerPos;
+    float playerSpeed;
     DWORD now;
 
     VehicleEvalContext()
-        : playerPed(0), playerVehicle(0), now(0)
+        : playerPed(0), playerVehicle(0), playerSpeed(0.0f), now(0)
     {
         ZeroMemory(&playerPos, sizeof(playerPos));
     }
@@ -322,17 +329,6 @@ static bool IsWithinRadiusSq(const Vector3& a, const Vector3& b, float radius)
     return DistSq(a, b) <= (radius * radius);
 }
 
-static bool IsPlayerMovingTooFastForVisibleApply()
-{
-    Ped playerPed = PLAYER::PLAYER_PED_ID();
-    if (!ENTITY::DOES_ENTITY_EXIST(playerPed))
-        return false;
-
-    const Vehicle playerVehicle = PED::GET_VEHICLE_PED_IS_IN(playerPed, false);
-    const Entity speedEntity = (playerVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(playerVehicle)) ? (Entity)playerVehicle : (Entity)playerPed;
-    return ENTITY::GET_ENTITY_SPEED(speedEntity) > kVisibleApplyPlayerSpeedMax;
-}
-
 static bool ChancePass(int pct)
 {
     pct = ClampPct(pct);
@@ -347,6 +343,8 @@ static VehicleEvalContext MakeVehicleEvalContext(const Vector3& playerPos, DWORD
     ctx.playerPed = PLAYER::PLAYER_PED_ID();
     ctx.playerVehicle = (ctx.playerPed != 0 && ENTITY::DOES_ENTITY_EXIST(ctx.playerPed)) ? PED::GET_VEHICLE_PED_IS_IN(ctx.playerPed, false) : 0;
     ctx.playerPos = playerPos;
+    const Entity speedEntity = (ctx.playerVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(ctx.playerVehicle)) ? (Entity)ctx.playerVehicle : (Entity)ctx.playerPed;
+    ctx.playerSpeed = (speedEntity != 0 && ENTITY::DOES_ENTITY_EXIST(speedEntity)) ? ENTITY::GET_ENTITY_SPEED(speedEntity) : 0.0f;
     ctx.now = now;
     return ctx;
 }
@@ -491,60 +489,24 @@ static void AppendUniqueRange(std::vector<int>& out, const int* vals, size_t cou
 
 static bool IsRealisticRestrictedColor(int color)
 {
+    // The realistic palette is intentionally broad. Keep only the most
+    // conspicuous/special-purpose colors out; recent-color scoring handles
+    // repetition without forcing nearly all traffic into grey/black/white.
     switch (color)
     {
-    case 31:
-    case 32:
-    case 33:
-    case 34:
-    case 35:
-    case 40:
-    case 43:
-    case 44:
-    case 46:
-    case 52:
-    case 53:
-    case 56:
-    case 57:
-    case 63:
-    case 64:
-    case 67:
-    case 68:
-    case 69:
-    case 70:
-    case 73:
-    case 74:
-    case 75:
-    case 76:
-    case 77:
-    case 78:
-    case 79:
-    case 80:
-    case 82:
-    case 83:
-    case 84:
-    case 85:
+    case 44: // Util Bright Red
+    case 55:
+    case 67: // Metallic Diamond Blue
+    case 70: // Metallic Bright Blue
+    case 73: // Metallic Ultra Blue
+    case 74: // Metallic Bright Blue
+    case 79: // Util Lightning Blue
+    case 80: // Util Maui Blue Poly
+    case 83: // Matte Blue
     case 88:
     case 89:
-    case 90:
     case 91:
     case 92:
-    case 94:
-    case 97:
-    case 98:
-    case 99:
-    case 100:
-    case 101:
-    case 102:
-    case 103:
-    case 104:
-    case 105:
-    case 107:
-    case 108:
-    case 109:
-    case 110:
-    case 112:
-    case 117:
     case 125:
     case 128:
     case 129:
@@ -583,30 +545,31 @@ static WeightedPalette BuildRealisticPalette()
     WeightedPalette p;
 
     const int ultraCommonNeutrals[] = {
-        0,1,2,3,4,5,6,7,8,9,10,17,18,19,22,23,25,111,121,122,131,132,134
+        0,1,2,3,4,5,6,7,8,9,10,16,17,18,19,20,22,23,25,26,111,112,121,122,131,132,134
     };
-    const int commonNeutrals[] = {
-        0,1,2,3,4,5,6,7,8,9,10,16,17,18,19,20,22,23,25,26,111,121,122,131,132,134
+    const int commonReds[] = {
+        27,28,29,30,31,32,33,34,35,40,43,44,46
     };
-    const int uncommonReds[] = {
-        27,28,29,30
+    const int commonGreens[] = {
+        49,50,51,52,53,54,56,57
     };
-    const int uncommonGreens[] = {
-        49,50,51,54
+    const int commonBlues[] = {
+        // Favor dark, muted, and worn blues in realistic traffic. The conspicuously
+        // bright/electric blues are filtered by IsRealisticRestrictedColor().
+        61,62,63,64,65,66,68,69,75,76,77,78,82,84,85
     };
-    const int uncommonBlues[] = {
-        61,62,65,66
+    const int commonWarm[] = {
+        37,90,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,123,124,133,144
     };
-    const int rareEarthTones[] = {
-        37,93,95,96,106,123,124,133,144
+    const int rareAccents[] = {
+        31,33,35,40,44,53,57,64,67,69,70,74,79,80,83,84,104,123,124,133,144
     };
 
     AppendUniqueRange(p.neutrals, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
-    AppendUniqueRange(p.neutrals, commonNeutrals, sizeof(commonNeutrals) / sizeof(commonNeutrals[0]));
-    AppendUniqueRange(p.reds, uncommonReds, sizeof(uncommonReds) / sizeof(uncommonReds[0]));
-    AppendUniqueRange(p.greens, uncommonGreens, sizeof(uncommonGreens) / sizeof(uncommonGreens[0]));
-    AppendUniqueRange(p.blues, uncommonBlues, sizeof(uncommonBlues) / sizeof(uncommonBlues[0]));
-    AppendUniqueRange(p.warm, rareEarthTones, sizeof(rareEarthTones) / sizeof(rareEarthTones[0]));
+    AppendUniqueRange(p.reds, commonReds, sizeof(commonReds) / sizeof(commonReds[0]));
+    AppendUniqueRange(p.greens, commonGreens, sizeof(commonGreens) / sizeof(commonGreens[0]));
+    AppendUniqueRange(p.blues, commonBlues, sizeof(commonBlues) / sizeof(commonBlues[0]));
+    AppendUniqueRange(p.warm, commonWarm, sizeof(commonWarm) / sizeof(commonWarm[0]));
 
     RemoveRealisticRestrictedColors(p.neutrals);
     RemoveRealisticRestrictedColors(p.reds);
@@ -616,19 +579,22 @@ static WeightedPalette BuildRealisticPalette()
 
     AppendUniqueRange(p.ultraCommon, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
 
+    // Common traffic favors conservative paint. Reds are intentionally kept out
+    // of this pool so they remain present without becoming one of the dominant
+    // traffic colors. Muted blues, greens, and warm/earth tones still add variety.
     AppendUniqueRange(p.common, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
-    AppendUniqueRange(p.common, commonNeutrals, sizeof(commonNeutrals) / sizeof(commonNeutrals[0]));
+    AppendUniqueRange(p.common, commonGreens, sizeof(commonGreens) / sizeof(commonGreens[0]));
+    AppendUniqueRange(p.common, commonBlues, sizeof(commonBlues) / sizeof(commonBlues[0]));
+    AppendUniqueRange(p.common, commonWarm, sizeof(commonWarm) / sizeof(commonWarm[0]));
 
-    AppendUniqueRange(p.uncommon, commonNeutrals, sizeof(commonNeutrals) / sizeof(commonNeutrals[0]));
-    AppendUniqueRange(p.uncommon, uncommonReds, sizeof(uncommonReds) / sizeof(uncommonReds[0]));
-    AppendUniqueRange(p.uncommon, uncommonGreens, sizeof(uncommonGreens) / sizeof(uncommonGreens[0]));
-    AppendUniqueRange(p.uncommon, uncommonBlues, sizeof(uncommonBlues) / sizeof(uncommonBlues[0]));
-    AppendUniqueRange(p.uncommon, rareEarthTones, sizeof(rareEarthTones) / sizeof(rareEarthTones[0]));
+    // Uncommon is deliberately color-forward so recent-memory scoring has a
+    // much larger realistic set to rotate through.
+    AppendUniqueRange(p.uncommon, commonReds, sizeof(commonReds) / sizeof(commonReds[0]));
+    AppendUniqueRange(p.uncommon, commonGreens, sizeof(commonGreens) / sizeof(commonGreens[0]));
+    AppendUniqueRange(p.uncommon, commonBlues, sizeof(commonBlues) / sizeof(commonBlues[0]));
+    AppendUniqueRange(p.uncommon, commonWarm, sizeof(commonWarm) / sizeof(commonWarm[0]));
 
-    AppendUniqueRange(p.rare, uncommonReds, sizeof(uncommonReds) / sizeof(uncommonReds[0]));
-    AppendUniqueRange(p.rare, uncommonGreens, sizeof(uncommonGreens) / sizeof(uncommonGreens[0]));
-    AppendUniqueRange(p.rare, uncommonBlues, sizeof(uncommonBlues) / sizeof(uncommonBlues[0]));
-    AppendUniqueRange(p.rare, rareEarthTones, sizeof(rareEarthTones) / sizeof(rareEarthTones[0]));
+    AppendUniqueRange(p.rare, rareAccents, sizeof(rareAccents) / sizeof(rareAccents[0]));
 
     RemoveRealisticRestrictedColors(p.ultraCommon);
     RemoveRealisticRestrictedColors(p.common);
@@ -751,9 +717,9 @@ static const std::vector<int>& PickColorPool(const WeightedPalette& p, bool allo
 
     if (&p == &gRealisticPalette)
     {
-        if (roll < 32 && !p.ultraCommon.empty()) return p.ultraCommon;
-        if (roll < 75 && !p.common.empty()) return p.common;
-        if (roll < 95 && !p.uncommon.empty()) return p.uncommon;
+        if (roll < 38 && !p.ultraCommon.empty()) return p.ultraCommon;
+        if (roll < 72 && !p.common.empty()) return p.common;
+        if (roll < 94 && !p.uncommon.empty()) return p.uncommon;
         if (!p.rare.empty()) return p.rare;
         if (!p.common.empty()) return p.common;
         return p.uncommon;
@@ -865,12 +831,12 @@ static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int var
 
         if (realisticPalette)
         {
-            if (bucket == 0) score += 420;
-            else if (bucket == 1) score -= 20;
-            else if (bucket == 2) score -= 260;
-            else if (bucket == 3) score -= 320;
-            else if (bucket == 4) score -= 360;
-            else score -= 420;
+            if (bucket == 0) score += 180;
+            else if (bucket == 1) score -= 10;
+            else if (bucket == 2) score -= 85;
+            else if (bucket == 3) score -= 35;
+            else if (bucket == 4) score -= 25;
+            else score -= 120;
         }
 
         if (!found || score > bestScore)
@@ -905,13 +871,12 @@ struct SeenInfo
     DWORD nextEvaluation;
     Hash model;
     bool applied;
-    bool protectedNearby;
     bool queued;
     bool characterSwitchProtected;
 
     SeenInfo()
         : identity(0), firstSeen(0), lastSeen(0), lastApplied(0), nextEvaluation(0), model(0),
-        applied(false), protectedNearby(false), queued(false), characterSwitchProtected(false) {}
+        applied(false), queued(false), characterSwitchProtected(false) {}
 };
 
 struct VehicleCandidate
@@ -936,6 +901,7 @@ static std::deque<VehicleCandidate> gNormalCandidates;
 static DWORD gStartMs = 0;
 static DWORD gLastCleanupMs = 0;
 static DWORD gLastCensusMs = 0;
+static float gLastObservedPlayerSpeed = 0.0f;
 static Ped gLastObservedPlayerPed = 0;
 static Vehicle gLastObservedPlayerVehicle = 0;
 static std::string gCheatBuffer;
@@ -980,7 +946,6 @@ static void ProtectVehicleFromCharacterSwitch(Vehicle veh, DWORD now)
     si.lastApplied = now;
     si.model = model;
     si.applied = true;
-    si.protectedNearby = true;
     si.queued = false;
     si.characterSwitchProtected = true;
 }
@@ -1032,14 +997,6 @@ static void UpdateCharacterSwitchProtection()
     gLastObservedPlayerPed = playerPed;
 }
 
-static bool ShouldProtectNearbyVehicle(const VehicleRuntimeInfo& info, const Vector3& playerPos)
-{
-    if (info.hasDriver || !info.hasCoords) return false;
-
-    const float protectRadiusSq = info.isAircraft ? kNearbyAircraftProtectRadiusSq : kNearbyVehicleProtectRadiusSq;
-    return DistSq(info.coords, playerPos) <= protectRadiusSq;
-}
-
 static SeenInfo& GetOrResetVehicleState(Vehicle veh, Hash model, std::uintptr_t identity, DWORD now)
 {
     SeenInfo& si = gSeen[(int)veh];
@@ -1052,47 +1009,57 @@ static SeenInfo& GetOrResetVehicleState(Vehicle veh, Hash model, std::uintptr_t 
     return si;
 }
 
-static void RegisterVehicleSeen(Vehicle veh, const VehicleRuntimeInfo& info, const Vector3& playerPos, DWORD now, std::uintptr_t identity)
+static void RegisterVehicleSeen(Vehicle veh, const VehicleRuntimeInfo& info, DWORD now, std::uintptr_t identity)
 {
     SeenInfo& si = GetOrResetVehicleState(veh, info.model, identity, now);
     if (si.firstSeen == 0)
-    {
         si.firstSeen = now;
-        si.protectedNearby = ShouldProtectNearbyVehicle(info, playerPos);
-        return;
+}
+
+static float GetVisibleApplyMinDistance(const VehicleRuntimeInfo& info, float playerSpeed)
+{
+    float minDistance = info.hasDriver ? kVisibleSpawnApplyMinDistance : kVisibleParkedApplyMinDistance;
+
+    // At road/highway speed, waiting for a vehicle to become hidden can mean the
+    // player reaches it before it is ever processed. Reduce the visible safety
+    // distance gradually while moving fast, but keep a floor so changes are not
+    // performed immediately beside the player.
+    if (playerSpeed > kFastTravelSpeed)
+    {
+        const float speedOver = playerSpeed - kFastTravelSpeed;
+        minDistance -= speedOver * (info.hasDriver ? 0.85f : 0.65f);
+        const float floorDistance = info.hasDriver ? 24.0f : 40.0f;
+        if (minDistance < floorDistance) minDistance = floorDistance;
     }
 
-    if (!si.applied && !si.protectedNearby && ShouldProtectNearbyVehicle(info, playerPos))
-        si.protectedNearby = true;
+    return minDistance;
 }
 
-static bool IsFreshVisibleSpawnCandidate(const VehicleRuntimeInfo& info, const SeenInfo& si, const Vector3& playerPos, DWORD now)
+static bool IsSafeVisibleApplyCandidate(const VehicleRuntimeInfo& info, const SeenInfo& si, const Vector3& playerPos, float playerSpeed)
 {
     if (info.hasPlayerDriver || !info.onScreenKnown || !info.onScreen || !info.hasCoords) return false;
-    if (si.applied || si.protectedNearby) return false;
-    if (IsPlayerMovingTooFastForVisibleApply()) return false;
+    if (si.applied || si.characterSwitchProtected) return false;
 
-    const DWORD visibleAgeLimit = (DWORD)MaxInt(120, MinInt(gCfg.NewlySeenMaxAgeMs, (int)kVisibleSpawnApplyMaxAgeMs));
-    if ((now - si.firstSeen) > visibleAgeLimit)
-        return false;
-
-    const float minDistanceSq = info.hasDriver ? kVisibleSpawnApplyMinDistanceSq : kVisibleParkedApplyMinDistanceSq;
-    return DistSq(info.coords, playerPos) >= minDistanceSq;
+    const float minDistance = GetVisibleApplyMinDistance(info, playerSpeed);
+    return DistSq(info.coords, playerPos) >= (minDistance * minDistance);
 }
 
-static bool ShouldQueueVehicleForProcessing(const VehicleRuntimeInfo& info, const SeenInfo& si, const Vector3& playerPos, DWORD now)
+static bool ShouldQueueVehicleForProcessing(const VehicleRuntimeInfo& info, const SeenInfo& si, const Vector3& playerPos, DWORD now, float playerSpeed)
 {
     if (gCfg.RainbowMode)
         return true;
 
-    if (si.applied || si.protectedNearby || si.characterSwitchProtected)
-        return false;
-
-    if (gCfg.StrictSpawnOnly && (now - si.firstSeen) > (DWORD)MaxInt(0, gCfg.NewlySeenMaxAgeMs))
+    if (si.applied || si.characterSwitchProtected)
         return false;
 
     if (gCfg.RequireOffscreenApply && info.onScreenKnown && info.onScreen)
-        return IsFreshVisibleSpawnCandidate(info, si, playerPos, now);
+        return IsSafeVisibleApplyCandidate(info, si, playerPos, playerSpeed);
+
+    // When off-screen protection is enabled, stale vehicles are deliberately
+    // backfilled while hidden instead of being lost forever after the spawn window.
+    if (!gCfg.RequireOffscreenApply && gCfg.StrictSpawnOnly &&
+        (now - si.firstSeen) > (DWORD)MaxInt(0, gCfg.NewlySeenMaxAgeMs))
+        return false;
 
     return true;
 }
@@ -1242,7 +1209,7 @@ static int PickRealisticSecondaryColor(const WeightedPalette& palette, int prima
 {
     const int primaryBucket = BucketId(palette, primary);
 
-    if (RandInt(0, 100) < 98)
+    if (RandInt(0, 100) < 94)
         return primary;
 
     int bestColor = primary;
@@ -1338,22 +1305,22 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
 
         if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
         {
-            if (primaryBucket == 0) score += 260;
-            if (secondaryBucket == 0) score += 320;
-            if (primaryBucket == 1) score += 6;
-            if (secondaryBucket == 1) score -= 8;
-            if (primaryBucket == 2) score -= 180;
-            if (secondaryBucket == 2) score -= 240;
-            if (primaryBucket == 3) score -= 260;
-            if (secondaryBucket == 3) score -= 320;
-            if (primaryBucket == 4) score -= 320;
-            if (secondaryBucket == 4) score -= 380;
-            if (primaryBucket >= 5) score -= 420;
-            if (secondaryBucket >= 5) score -= 460;
+            if (primaryBucket == 0) score += 120;
+            if (secondaryBucket == 0) score += 150;
+            if (primaryBucket == 1) score -= 10;
+            if (secondaryBucket == 1) score -= 15;
+            if (primaryBucket == 2) score -= 95;
+            if (secondaryBucket == 2) score -= 110;
+            if (primaryBucket == 3) score -= 45;
+            if (secondaryBucket == 3) score -= 55;
+            if (primaryBucket == 4) score -= 35;
+            if (secondaryBucket == 4) score -= 45;
+            if (primaryBucket >= 5) score -= 120;
+            if (secondaryBucket >= 5) score -= 140;
 
-            if (primaryBucket == 0 && secondaryBucket == 0) score += 180;
-            if ((primaryBucket == 0 && secondaryBucket != 0) || (primaryBucket != 0 && secondaryBucket == 0)) score += 20;
-            if (primaryBucket != 0 && secondaryBucket != 0 && primaryBucket != secondaryBucket) score -= 260;
+            if (primaryBucket == 0 && secondaryBucket == 0) score += 80;
+            if ((primaryBucket == 0 && secondaryBucket != 0) || (primaryBucket != 0 && secondaryBucket == 0)) score += 35;
+            if (primaryBucket != 0 && secondaryBucket != 0 && primaryBucket != secondaryBucket) score -= 110;
 
             if (gCfg.TwoToneColors)
                 score += ScoreRealisticTwoTonePair(primaryBucket, secondaryBucket, sameColor);
@@ -1534,15 +1501,17 @@ static void CensusVehicles()
     const DWORD now = GameTimeMs();
     if (now - gStartMs < kStartupWarmupMs) return;
 
-    const DWORD censusInterval = gCfg.RainbowMode ? kRainbowVehicleCensusIntervalMs : kVehicleCensusIntervalMs;
-    if (now - gLastCensusMs < censusInterval) return;
-    gLastCensusMs = now;
-
     Ped player = PLAYER::PLAYER_PED_ID();
     if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
 
     const Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(player, true);
     const VehicleEvalContext ctx = MakeVehicleEvalContext(playerPos, now);
+    gLastObservedPlayerSpeed = ctx.playerSpeed;
+    const DWORD censusInterval = gCfg.RainbowMode
+        ? kRainbowVehicleCensusIntervalMs
+        : ((ctx.playerSpeed >= kFastTravelSpeed) ? kFastVehicleCensusIntervalMs : kVehicleCensusIntervalMs);
+    if (now - gLastCensusMs < censusInterval) return;
+    gLastCensusMs = now;
 
     Vehicle pool[kScanArraySize];
     const int count = worldGetAllVehicles(pool, kScanArraySize);
@@ -1570,9 +1539,6 @@ static void CensusVehicles()
             if (known.characterSwitchProtected || known.queued)
                 continue;
 
-            if (!gCfg.RainbowMode && known.protectedNearby)
-                continue;
-
             if (!gCfg.RainbowMode && known.applied)
                 continue;
 
@@ -1595,22 +1561,32 @@ static void CensusVehicles()
             continue;
         }
 
-        const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
-        if (!IsWithinRadiusSq(info.coords, playerPos, radius))
+        // By default the census covers the whole streamed vehicle pool, allowing
+        // colors to be assigned before vehicles get close enough to be noticed.
+        // Radius mode remains available as a compatibility fallback.
+        if (!gCfg.ProcessAllLoadedVehicles)
         {
-            si.nextEvaluation = now + kOutsideRadiusRecheckMs;
+            const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
+            if (!IsWithinRadiusSq(info.coords, playerPos, radius))
+            {
+                si.nextEvaluation = now + kOutsideRadiusRecheckMs;
+                continue;
+            }
+        }
+
+        RegisterVehicleSeen(veh, info, now, identity);
+
+        if (!ShouldQueueVehicleForProcessing(info, si, playerPos, now, ctx.playerSpeed))
+        {
+            si.nextEvaluation = now + kVisibleVehicleRecheckMs;
             continue;
         }
 
-        RegisterVehicleSeen(veh, info, playerPos, now, identity);
-
-        if (!ShouldQueueVehicleForProcessing(info, si, playerPos, now))
-        {
-            si.nextEvaluation = 0;
-            continue;
-        }
-
-        const bool urgent = IsFreshVisibleSpawnCandidate(info, si, playerPos, now);
+        // Hidden vehicles remain highest priority. During fast travel, distant
+        // visible vehicles are also urgent so the queue cannot fall behind the
+        // player's closing speed.
+        const bool fastVisible = ctx.playerSpeed >= kFastTravelSpeed && info.onScreenKnown && info.onScreen;
+        const bool urgent = (info.onScreenKnown && !info.onScreen) || fastVisible;
         QueueVehicleCandidate(veh, si, urgent);
     }
 
@@ -1646,8 +1622,15 @@ static void ProcessVehicleCandidates()
     const DWORD now = GameTimeMs();
     const Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(player, true);
     const VehicleEvalContext ctx = MakeVehicleEvalContext(playerPos, now);
-    const int maxExamined = gCfg.RainbowMode ? kRainbowVehiclesExaminedPerTick : kVehiclesExaminedPerTick;
-    const int maxApplied = gCfg.RainbowMode ? kRainbowMaxAppliesPerTick : kMaxAppliesPerTick;
+    gLastObservedPlayerSpeed = ctx.playerSpeed;
+    const bool fastTravel = ctx.playerSpeed >= kFastTravelSpeed;
+    const bool veryFastTravel = ctx.playerSpeed >= kVeryFastTravelSpeed;
+    const int maxExamined = gCfg.RainbowMode
+        ? kRainbowVehiclesExaminedPerTick
+        : (fastTravel ? (veryFastTravel ? kFastVehiclesExaminedPerTick + 12 : kFastVehiclesExaminedPerTick) : kVehiclesExaminedPerTick);
+    const int maxApplied = gCfg.RainbowMode
+        ? kRainbowMaxAppliesPerTick
+        : (fastTravel ? (veryFastTravel ? kFastMaxAppliesPerTick + 4 : kFastMaxAppliesPerTick) : kMaxAppliesPerTick);
 
     int examined = 0;
     int applied = 0;
@@ -1692,18 +1675,21 @@ static void ProcessVehicleCandidates()
             continue;
         }
 
-        const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
-        if (!IsWithinRadiusSq(info.coords, playerPos, radius))
+        if (!gCfg.ProcessAllLoadedVehicles)
         {
-            si.nextEvaluation = now + kOutsideRadiusRecheckMs;
-            continue;
+            const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
+            if (!IsWithinRadiusSq(info.coords, playerPos, radius))
+            {
+                si.nextEvaluation = now + kOutsideRadiusRecheckMs;
+                continue;
+            }
         }
 
-        RegisterVehicleSeen(candidate.handle, info, playerPos, now, currentIdentity);
+        RegisterVehicleSeen(candidate.handle, info, now, currentIdentity);
 
-        if (!ShouldQueueVehicleForProcessing(info, si, playerPos, now))
+        if (!ShouldQueueVehicleForProcessing(info, si, playerPos, now, ctx.playerSpeed))
         {
-            si.nextEvaluation = 0;
+            si.nextEvaluation = now + kVisibleVehicleRecheckMs;
             continue;
         }
 
@@ -1786,6 +1772,7 @@ static void LoadConfig()
     gCfg.Radius = IniFloat(ini, "General", "Radius", 170.0f);
     gCfg.AircraftRadius = IniFloat(ini, "General", "AircraftRadius", 260.0f);
     gCfg.UpdateIntervalMs = IniInt(ini, "General", "UpdateIntervalMs", 170);
+    gCfg.ProcessAllLoadedVehicles = IniBool(ini, "General", "ProcessAllLoadedVehicles", true);
 
     gCfg.RecentPerModel = IniInt(ini, "Variety", "RecentPerModel", 90);
     gCfg.AircraftRecentPerModel = IniInt(ini, "Variety", "AircraftRecentPerModel", 50);
@@ -1835,7 +1822,11 @@ static void LoadConfig()
             << " Radius=" << gCfg.Radius
             << " AircraftRadius=" << gCfg.AircraftRadius
             << " UpdateIntervalMs=" << gCfg.UpdateIntervalMs
+            << " ProcessAllLoadedVehicles=" << (gCfg.ProcessAllLoadedVehicles ? 1 : 0)
             << " ParkedVehicleColors=" << (gCfg.ParkedVehicleColors ? 1 : 0)
+            << " RequireOffscreenApply=" << (gCfg.RequireOffscreenApply ? 1 : 0)
+            << " StrictSpawnOnly=" << (gCfg.StrictSpawnOnly ? 1 : 0)
+            << " coverage=all_loaded_eligible"
             << " LogFile=" << logPath;
         gLog.WriteLine(oss.str());
     }
@@ -1864,7 +1855,16 @@ void ScriptMain()
                 NotifyFeed("~b~~h~Dynamic Traffic Colors~s~\nINI reloaded.");
         }
 
-        if (now - lastUpdate >= (DWORD)MaxInt(20, gCfg.UpdateIntervalMs))
+        DWORD updateInterval = (DWORD)MaxInt(20, gCfg.UpdateIntervalMs);
+        if (gCfg.ProcessAllLoadedVehicles && !gCfg.RainbowMode)
+        {
+            if (gLastObservedPlayerSpeed >= kVeryFastTravelSpeed)
+                updateInterval = (DWORD)MinInt((int)updateInterval, (int)kVeryFastUpdateIntervalMs);
+            else if (gLastObservedPlayerSpeed >= kFastTravelSpeed)
+                updateInterval = (DWORD)MinInt((int)updateInterval, (int)kFastUpdateIntervalMs);
+        }
+
+        if (now - lastUpdate >= updateInterval)
         {
             lastUpdate = now;
             ScanAndApply();
