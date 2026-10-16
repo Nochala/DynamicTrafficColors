@@ -1,15 +1,3 @@
-
-// Written by:
-// 
-// ███╗   ██╗ ██████╗  ██████╗██╗  ██╗ █████╗ ██╗      █████╗ 
-// ████╗  ██║██╔═══██╗██╔════╝██║  ██║██╔══██╗██║     ██╔══██╗
-// ██╔██╗ ██║██║   ██║██║     ███████║███████║██║     ███████║
-// ██║╚██╗██║██║   ██║██║     ██╔══██║██╔══██║██║     ██╔══██║
-// ██║ ╚████║╚██████╔╝╚██████╗██║  ██║██║  ██║███████╗██║  ██║
-// ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-//
-//          ░░▒▒▓▓ https://github.com/Nochala ▓▓▒▒░░
-
 #include "script.h"
 #include <windows.h>
 #include <string>
@@ -24,7 +12,6 @@
 #include <cctype>
 #include <natives.h>
 
-// ========== VEHICLE REGISTRY / CANDIDATE PROCESSING ==========
 static const int kScanArraySize = 1024;
 static const int kVehiclesExaminedPerTick = 28;
 static const int kMaxAppliesPerTick = 8;
@@ -33,10 +20,10 @@ static const int kFastMaxAppliesPerTick = 16;
 static const int kRainbowVehiclesExaminedPerTick = 36;
 static const int kRainbowMaxAppliesPerTick = 12;
 static const DWORD kVehicleCensusIntervalMs = 110;
-static const DWORD kFastVehicleCensusIntervalMs = 55;
+static const DWORD kFastVehicleCensusIntervalMs = 110;
 static const DWORD kFastUpdateIntervalMs = 75;
 static const DWORD kVeryFastUpdateIntervalMs = 55;
-static const DWORD kRainbowVehicleCensusIntervalMs = 120;
+static const DWORD kRainbowVehicleCensusIntervalMs = 180;
 static const DWORD kRainbowReapplyIntervalMs = 900;
 static const DWORD kRejectedVehicleRecheckMs = 750;
 static const DWORD kOutsideRadiusRecheckMs = 250;
@@ -45,7 +32,6 @@ static const float kVisibleSpawnApplyMinDistance = 45.0f;
 static const float kVisibleParkedApplyMinDistance = 65.0f;
 static const float kFastTravelSpeed = 12.0f;
 static const float kVeryFastTravelSpeed = 25.0f;
-static const int kRerollAttempts = 16;
 static const DWORD kStartupWarmupMs = 750;
 static const DWORD kCleanupIntervalMs = 2500;
 static const DWORD kSeenTtlMs = 18000;
@@ -195,6 +181,11 @@ struct Config
     bool SkipEmergency;
     bool SkipMissionVehicles;
     bool ServiceVehiclesKeepColors;
+    std::vector<Hash> VehicleBlacklist;
+    std::vector<Hash> VehicleWhitelist;
+    std::vector<int> VehicleClassWhitelist;
+    bool Whitelist;
+    bool ClassWhitelist;
     bool RequireOffscreenApply;
     bool StrictSpawnOnly;
     int NewlySeenMaxAgeMs;
@@ -235,6 +226,8 @@ struct Config
         SkipEmergency = true;
         SkipMissionVehicles = true;
         ServiceVehiclesKeepColors = true;
+        Whitelist = false;
+        ClassWhitelist = false;
         RequireOffscreenApply = true;
         StrictSpawnOnly = true;
         NewlySeenMaxAgeMs = 900;
@@ -264,6 +257,7 @@ static Logger gLog;
 struct VehicleRuntimeInfo
 {
     Hash model;
+    int vehicleClass;
     Ped driver;
     Vector3 coords;
     bool hasCoords;
@@ -280,7 +274,7 @@ struct VehicleRuntimeInfo
     bool onScreenKnown;
 
     VehicleRuntimeInfo()
-        : model(0), driver(0), hasCoords(false), hasDriver(false), hasPlayerDriver(false),
+        : model(0), vehicleClass(-1), driver(0), hasCoords(false), hasDriver(false), hasPlayerDriver(false),
         isPlayerVehicle(false), isMissionEntity(false), isEmergency(false), driveable(false), isPlane(false),
         isHelicopter(false), isAircraft(false), onScreen(false), onScreenKnown(false)
     {
@@ -292,12 +286,13 @@ struct VehicleEvalContext
 {
     Ped playerPed;
     Vehicle playerVehicle;
+    Vehicle lastPlayerVehicle;
     Vector3 playerPos;
     float playerSpeed;
     DWORD now;
 
     VehicleEvalContext()
-        : playerPed(0), playerVehicle(0), playerSpeed(0.0f), now(0)
+        : playerPed(0), playerVehicle(0), lastPlayerVehicle(0), playerSpeed(0.0f), now(0)
     {
         ZeroMemory(&playerPos, sizeof(playerPos));
     }
@@ -315,7 +310,6 @@ static float DistSq(const Vector3& a, const Vector3& b)
     return dx * dx + dy * dy + dz * dz;
 }
 
-// ========== PERFORMANCE FIX: Inline validation to reduce function call overhead ==========
 static inline bool IsValidVehicleHandle(Vehicle v)
 {
     if (v == 0) return false;
@@ -342,6 +336,7 @@ static VehicleEvalContext MakeVehicleEvalContext(const Vector3& playerPos, DWORD
     VehicleEvalContext ctx;
     ctx.playerPed = PLAYER::PLAYER_PED_ID();
     ctx.playerVehicle = (ctx.playerPed != 0 && ENTITY::DOES_ENTITY_EXIST(ctx.playerPed)) ? PED::GET_VEHICLE_PED_IS_IN(ctx.playerPed, false) : 0;
+    ctx.lastPlayerVehicle = (ctx.playerPed != 0 && ENTITY::DOES_ENTITY_EXIST(ctx.playerPed)) ? PED::GET_VEHICLE_PED_IS_IN(ctx.playerPed, true) : 0;
     ctx.playerPos = playerPos;
     const Entity speedEntity = (ctx.playerVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(ctx.playerVehicle)) ? (Entity)ctx.playerVehicle : (Entity)ctx.playerPed;
     ctx.playerSpeed = (speedEntity != 0 && ENTITY::DOES_ENTITY_EXIST(speedEntity)) ? ENTITY::GET_ENTITY_SPEED(speedEntity) : 0.0f;
@@ -357,12 +352,14 @@ static bool PopulateVehicleRuntimeInfo(Vehicle veh, const VehicleEvalContext& ct
     outInfo.driver = VEHICLE::GET_PED_IN_VEHICLE_SEAT(veh, -1);
     outInfo.hasDriver = outInfo.driver != 0 && ENTITY::DOES_ENTITY_EXIST(outInfo.driver);
     outInfo.hasPlayerDriver = outInfo.hasDriver && PED::IS_PED_A_PLAYER(outInfo.driver) != 0;
-    outInfo.isPlayerVehicle = ctx.playerVehicle != 0 && ctx.playerVehicle == veh;
+    outInfo.isPlayerVehicle = (ctx.playerVehicle != 0 && ctx.playerVehicle == veh) ||
+        (ctx.lastPlayerVehicle != 0 && ctx.lastPlayerVehicle == veh);
     outInfo.isMissionEntity = ENTITY::IS_ENTITY_A_MISSION_ENTITY(veh) != 0;
-    outInfo.isEmergency = VEHICLE::GET_VEHICLE_CLASS(veh) == 18;
+    const int vehicleClass = VEHICLE::GET_VEHICLE_CLASS(veh);
+    outInfo.vehicleClass = vehicleClass;
+    outInfo.isEmergency = vehicleClass == 18;
     outInfo.driveable = VEHICLE::IS_VEHICLE_DRIVEABLE(veh, false) != 0;
 
-    const int vehicleClass = VEHICLE::GET_VEHICLE_CLASS(veh);
     outInfo.isPlane = vehicleClass == 16;
     outInfo.isHelicopter = vehicleClass == 15;
     outInfo.isAircraft = outInfo.isPlane || outInfo.isHelicopter;
@@ -404,8 +401,9 @@ static bool IsServiceVehicleModel(Hash model)
             "docktug","ripley","airtug","tractor","tractor2","tractor3","forklift","mixer","mixer2","rubble"
         };
         for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) models.push_back(HashName(names[i]));
+        std::sort(models.begin(), models.end());
     }
-    return std::find(models.begin(), models.end(), model) != models.end();
+    return std::binary_search(models.begin(), models.end(), model);
 }
 
 struct WeightedPalette
@@ -489,20 +487,18 @@ static void AppendUniqueRange(std::vector<int>& out, const int* vals, size_t cou
 
 static bool IsRealisticRestrictedColor(int color)
 {
-    // The realistic palette is intentionally broad. Keep only the most
-    // conspicuous/special-purpose colors out; recent-color scoring handles
-    // repetition without forcing nearly all traffic into grey/black/white.
+
     switch (color)
     {
-    case 44: // Util Bright Red
+    case 44: 
     case 55:
-    case 67: // Metallic Diamond Blue
-    case 70: // Metallic Bright Blue
-    case 73: // Metallic Ultra Blue
-    case 74: // Metallic Bright Blue
-    case 79: // Util Lightning Blue
-    case 80: // Util Maui Blue Poly
-    case 83: // Matte Blue
+    case 67: 
+    case 70: 
+    case 73: 
+    case 74: 
+    case 79: 
+    case 80: 
+    case 83: 
     case 88:
     case 89:
     case 91:
@@ -554,8 +550,7 @@ static WeightedPalette BuildRealisticPalette()
         49,50,51,52,53,54,56,57
     };
     const int commonBlues[] = {
-        // Favor dark, muted, and worn blues in realistic traffic. The conspicuously
-        // bright/electric blues are filtered by IsRealisticRestrictedColor().
+
         61,62,63,64,65,66,68,69,75,76,77,78,82,84,85
     };
     const int commonWarm[] = {
@@ -579,16 +574,11 @@ static WeightedPalette BuildRealisticPalette()
 
     AppendUniqueRange(p.ultraCommon, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
 
-    // Common traffic favors conservative paint. Reds are intentionally kept out
-    // of this pool so they remain present without becoming one of the dominant
-    // traffic colors. Muted blues, greens, and warm/earth tones still add variety.
     AppendUniqueRange(p.common, ultraCommonNeutrals, sizeof(ultraCommonNeutrals) / sizeof(ultraCommonNeutrals[0]));
     AppendUniqueRange(p.common, commonGreens, sizeof(commonGreens) / sizeof(commonGreens[0]));
     AppendUniqueRange(p.common, commonBlues, sizeof(commonBlues) / sizeof(commonBlues[0]));
     AppendUniqueRange(p.common, commonWarm, sizeof(commonWarm) / sizeof(commonWarm[0]));
 
-    // Uncommon is deliberately color-forward so recent-memory scoring has a
-    // much larger realistic set to rotate through.
     AppendUniqueRange(p.uncommon, commonReds, sizeof(commonReds) / sizeof(commonReds[0]));
     AppendUniqueRange(p.uncommon, commonGreens, sizeof(commonGreens) / sizeof(commonGreens[0]));
     AppendUniqueRange(p.uncommon, commonBlues, sizeof(commonBlues) / sizeof(commonBlues[0]));
@@ -672,7 +662,6 @@ static WeightedPalette BuildArcadePalette()
 
     return p;
 }
-
 
 static WeightedPalette gRealisticPalette = BuildRealisticPalette();
 static WeightedPalette gArcadePalette = BuildArcadePalette();
@@ -797,16 +786,22 @@ static int BucketId(const WeightedPalette& p, int color)
     return lookup.values[color];
 }
 
-static int CountBucketInRecent(const WeightedPalette& p, const std::deque<int>& recent, int bucket)
+static const std::vector<int>& ColorsForBucket(const WeightedPalette& p, int bucket);
+
+static int PickRealisticPrimaryBucket()
 {
-    int c = 0;
-    for (size_t i = 0; i < recent.size(); ++i) if (BucketId(p, recent[i]) == bucket) ++c;
-    return c;
+    const int roll = RandInt(0, 100);
+    if (roll < 38) return 0;
+    if (roll < 63) return 1;
+    if (roll < 78) return 2;
+    if (roll < 85) return 3;
+    return 4;
 }
 
-static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int varietyMultiplier, const std::deque<int>& recentBuckets)
+static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int varietyMultiplier, const int* bucketHits, const int* exactHits, const int* lastDistances, int requiredBucket = -1)
 {
-    const std::vector<int>& pool = PickColorPool(p, allowBright);
+    const std::vector<int>& pool = (requiredBucket >= 0 && requiredBucket <= 4)
+        ? ColorsForBucket(p, requiredBucket) : PickColorPool(p, allowBright);
     if (pool.empty()) return 0;
 
     const bool realisticPalette = (&p == &gRealisticPalette);
@@ -814,7 +809,7 @@ static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int var
     int bestScore = -999999;
     bool found = false;
 
-    for (int i = 0; i < MaxInt(kRerollAttempts, 30); ++i)
+    for (int i = 0; i < (realisticPalette ? 8 : 10); ++i)
     {
         int color = pool[RandInt(0, (int)pool.size())];
         if (IsGloballyBlacklistedColor(color))
@@ -822,12 +817,11 @@ static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int var
         if (realisticPalette && IsRealisticRestrictedColor(color))
             continue;
 
-        int bucket = BucketId(p, color);
-        int bucketHits = CountBucketInRecent(p, recentBuckets, bucket);
-        int exactHits = CountInRecent(recentBuckets, color);
-        int score = RandInt(0, 1000) - bucketHits * varietyMultiplier;
-        score -= exactHits * MaxInt(45, varietyMultiplier / 2);
-        score -= RecentValuePenalty(recentBuckets, color, 18, 1350, 120);
+        const int bucket = BucketId(p, color);
+        int score = RandInt(0, 1000) - bucketHits[bucket] * varietyMultiplier;
+        score -= exactHits[color] * MaxInt(45, varietyMultiplier / 2);
+        if (lastDistances[color] >= 0)
+            score -= 1350 - (1230 * lastDistances[color] / 17);
 
         if (realisticPalette)
         {
@@ -915,7 +909,58 @@ static std::uintptr_t GetVehicleIdentity(Vehicle veh)
 static bool IsBlacklistedVehicleModel(Hash model)
 {
     static const Hash kPoliceMaverickModel = HashName("polmav");
-    return model == kPoliceMaverickModel;
+    return model == kPoliceMaverickModel ||
+        std::binary_search(gCfg.VehicleBlacklist.begin(), gCfg.VehicleBlacklist.end(), model);
+}
+
+static void LoadVehicleModelList(const std::string& ini, const char* key, std::vector<Hash>& target)
+{
+    char buffer[8192] = {};
+    GetPrivateProfileStringA("Filters", key, "", buffer, sizeof(buffer), ini.c_str());
+
+    std::vector<Hash> models;
+    std::istringstream stream(buffer);
+    std::string name;
+    while (std::getline(stream, name, ','))
+    {
+        const size_t first = name.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            continue;
+        const size_t last = name.find_last_not_of(" \t\r\n");
+        name = name.substr(first, last - first + 1);
+        for (size_t i = 0; i < name.size(); ++i)
+            name[i] = (char)std::tolower((unsigned char)name[i]);
+        models.push_back(HashName(name.c_str()));
+    }
+
+    std::sort(models.begin(), models.end());
+    models.erase(std::unique(models.begin(), models.end()), models.end());
+    target.swap(models);
+}
+
+static void LoadVehicleClassWhitelist(const std::string& ini)
+{
+    char buffer[1024] = {};
+    GetPrivateProfileStringA("Filters", "VehicleClassWhitelist", "", buffer, sizeof(buffer), ini.c_str());
+
+    std::vector<int> classes;
+    std::istringstream stream(buffer);
+    std::string value;
+    while (std::getline(stream, value, ','))
+    {
+        char* end = NULL;
+        const long vehicleClass = std::strtol(value.c_str(), &end, 10);
+        if (end == value.c_str())
+            continue;
+        while (*end && std::isspace((unsigned char)*end)) ++end;
+        if (*end != '\0' || vehicleClass < 0 || vehicleClass > 22)
+            continue;
+        classes.push_back((int)vehicleClass);
+    }
+
+    std::sort(classes.begin(), classes.end());
+    classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+    gCfg.VehicleClassWhitelist.swap(classes);
 }
 
 static void ResetVehicleCandidateState()
@@ -983,6 +1028,8 @@ static void UpdateCharacterSwitchProtection()
 
     if (currentVehicle != 0)
     {
+        if (currentVehicle != gLastObservedPlayerVehicle || !IsCharacterSwitchProtectedVehicle(currentVehicle))
+            ProtectVehicleFromCharacterSwitch(currentVehicle, now);
         gLastObservedPlayerVehicle = currentVehicle;
 
         std::unordered_map<int, SeenInfo>::iterator it = gSeen.find((int)currentVehicle);
@@ -1020,10 +1067,6 @@ static float GetVisibleApplyMinDistance(const VehicleRuntimeInfo& info, float pl
 {
     float minDistance = info.hasDriver ? kVisibleSpawnApplyMinDistance : kVisibleParkedApplyMinDistance;
 
-    // At road/highway speed, waiting for a vehicle to become hidden can mean the
-    // player reaches it before it is ever processed. Reduce the visible safety
-    // distance gradually while moving fast, but keep a floor so changes are not
-    // performed immediately beside the player.
     if (playerSpeed > kFastTravelSpeed)
     {
         const float speedOver = playerSpeed - kFastTravelSpeed;
@@ -1055,8 +1098,6 @@ static bool ShouldQueueVehicleForProcessing(const VehicleRuntimeInfo& info, cons
     if (gCfg.RequireOffscreenApply && info.onScreenKnown && info.onScreen)
         return IsSafeVisibleApplyCandidate(info, si, playerPos, playerSpeed);
 
-    // When off-screen protection is enabled, stale vehicles are deliberately
-    // backfilled while hidden instead of being lost forever after the spawn window.
     if (!gCfg.RequireOffscreenApply && gCfg.StrictSpawnOnly &&
         (now - si.firstSeen) > (DWORD)MaxInt(0, gCfg.NewlySeenMaxAgeMs))
         return false;
@@ -1106,6 +1147,8 @@ static void ReserveWorkingSet()
     gSeen.reserve(4096);
     gRecentPrimaryByModel.reserve(512);
     gRecentSecondaryByModel.reserve(512);
+    IsServiceVehicleModel(0);
+    IsBlacklistedVehicleModel(0);
 }
 
 static void MarkUsed(Hash model, int primary, int secondary, bool aircraft)
@@ -1166,6 +1209,51 @@ static bool IsTrafficVehicle(const VehicleRuntimeInfo& info)
     return gCfg.ParkedVehicleColors;
 }
 
+static bool IsPlayerOwnedVehicle(Vehicle veh)
+{
+    return DECORATOR::DECOR_EXIST_ON(veh, "Player_Vehicle") != 0 ||
+        DECORATOR::DECOR_EXIST_ON(veh, "Veh_Modded_By_Player") != 0 ||
+        DECORATOR::DECOR_EXIST_ON(veh, "PV_Slot") != 0 ||
+        DECORATOR::DECOR_EXIST_ON(veh, "Previous_Owner") != 0;
+}
+
+static bool IsAmbientTrafficPopulation(Vehicle veh)
+{
+    nativeInit(0xF6F5161F4534EDFFULL);
+    nativePush64((UINT64)(unsigned int)veh);
+    const UINT64* result = nativeCall();
+    if (result == NULL) return false;
+    const int populationType = (int)(*result);
+    return populationType >= 1 && populationType <= 5;
+}
+
+static bool IsProtectedStoryVehicle(Vehicle veh, Hash model)
+{
+    static const Hash tailgater = HashName("tailgater");
+    static const Hash buffalo2 = HashName("buffalo2");
+    static const Hash bodhi2 = HashName("bodhi2");
+    static const Hash bagger = HashName("bagger");
+    static const Hash premier = HashName("premier");
+
+    if (model != tailgater && model != buffalo2 && model != bodhi2 && model != bagger && model != premier)
+        return false;
+
+    const char* plate = VEHICLE::GET_VEHICLE_NUMBER_PLATE_TEXT(veh);
+    if (plate == NULL) return false;
+
+    std::string plateText(plate);
+    const size_t first = plateText.find_first_not_of(' ');
+    if (first == std::string::npos) return false;
+    const size_t last = plateText.find_last_not_of(' ');
+    plateText = plateText.substr(first, last - first + 1);
+
+    return (model == tailgater && plateText == "5MDS003") ||
+        (model == buffalo2 && plateText == "FC1988") ||
+        (model == bodhi2 && (plateText == "BETTY 32" || plateText == "BETTY32")) ||
+        (model == bagger && plateText == "FC88") ||
+        (model == premier && plateText == "880HS955");
+}
+
 static bool AllowVehicleByFilters(Vehicle veh, const VehicleRuntimeInfo& info)
 {
     if (!info.driveable) return false;
@@ -1176,7 +1264,15 @@ static bool AllowVehicleByFilters(Vehicle veh, const VehicleRuntimeInfo& info)
     if (gCfg.AffectOnlyTraffic && !IsTrafficVehicle(info)) return false;
     if (gCfg.SkipEmergency && info.isEmergency) return false;
     if (IsBlacklistedVehicleModel(info.model)) return false;
+    if ((gCfg.Whitelist || gCfg.ClassWhitelist) &&
+        !(gCfg.Whitelist && std::binary_search(gCfg.VehicleWhitelist.begin(), gCfg.VehicleWhitelist.end(), info.model)) &&
+        !(gCfg.ClassWhitelist && std::binary_search(gCfg.VehicleClassWhitelist.begin(), gCfg.VehicleClassWhitelist.end(), info.vehicleClass)))
+        return false;
     if (gCfg.ServiceVehiclesKeepColors && IsServiceVehicleModel(info.model)) return false;
+    if (!info.hasDriver && INTERIOR::GET_INTERIOR_FROM_ENTITY(veh) != 0) return false;
+    if (IsPlayerOwnedVehicle(veh)) return false;
+    if (!IsAmbientTrafficPopulation(veh)) return false;
+    if (IsProtectedStoryVehicle(veh, info.model)) return false;
     return true;
 }
 
@@ -1252,12 +1348,34 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
 
     int bestP = 0, bestS = 0, bestScore = -999999;
     const bool nonRealisticMode = !gCfg.RealisticVehicleColors && !gCfg.RainbowMode;
-    const int tries = gCfg.RainbowMode ? 32 : (nonRealisticMode ? MaxInt(kRerollAttempts, 36) : MaxInt(kRerollAttempts, 22));
+    const int realisticPrimaryBucket = (gCfg.RealisticVehicleColors && !gCfg.RainbowMode) ? PickRealisticPrimaryBucket() : -1;
+    const int tries = gCfg.RainbowMode ? 12 : (nonRealisticMode ? 12 : 8);
+
+    int bucketHits[7] = {};
+    int exactHits[256] = {};
+    int lastDistances[256];
+    std::fill(lastDistances, lastDistances + 256, -1);
+    for (size_t i = 0; i < gRecentBuckets.size(); ++i)
+    {
+        const int color = gRecentBuckets[i];
+        if (color >= 0 && color < 256)
+        {
+            ++exactHits[color];
+            ++bucketHits[BucketId(palette, color)];
+        }
+    }
+    int distance = 0;
+    for (std::deque<int>::const_reverse_iterator it = gRecentBuckets.rbegin();
+        it != gRecentBuckets.rend() && distance < 18; ++it, ++distance)
+    {
+        if (*it >= 0 && *it < 256 && lastDistances[*it] < 0)
+            lastDistances[*it] = distance;
+    }
 
     for (int i = 0; i < tries; ++i)
     {
         const bool allowBrightSelection = gCfg.RainbowMode || (!gCfg.RealisticVehicleColors && gCfg.AllowBrightColors);
-        const int p = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+        const int p = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, bucketHits, exactHits, lastDistances, realisticPrimaryBucket);
 
         int s = p;
         if (gCfg.TwoToneColors)
@@ -1265,7 +1383,7 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
             if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
                 s = PickRealisticSecondaryColor(palette, p, recentSecondary);
             else
-                s = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, gRecentBuckets);
+                s = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, bucketHits, exactHits, lastDistances);
         }
 
         const int primaryBucket = BucketId(palette, p);
@@ -1332,8 +1450,8 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
         score -= CountInRecent(recentSecondary, s) * MaxInt(7, gCfg.NonRealisticOverusedColorPenalty * 2);
         score -= CountInRecent(gRecentGlobal, p) * 5;
         score -= CountInRecent(gRecentGlobal, s) * 4;
-        score -= CountBucketInRecent(palette, gRecentBuckets, primaryBucket) * MaxInt(10, gCfg.ColorVarietyMultiplier / 5);
-        score -= CountBucketInRecent(palette, gRecentBuckets, secondaryBucket) * MaxInt(8, gCfg.ColorVarietyMultiplier / 6);
+        score -= bucketHits[primaryBucket] * MaxInt(10, gCfg.ColorVarietyMultiplier / 5);
+        score -= bucketHits[secondaryBucket] * MaxInt(8, gCfg.ColorVarietyMultiplier / 6);
         score -= CountComboInRecent(gRecentCombos, combo) * 95;
 
         const size_t modelPrimaryLookback = (size_t)MinInt(nonRealisticMode ? 24 : 14, MaxInt(0, aircraft ? gCfg.AircraftRecentPerModel : gCfg.RecentPerModel));
@@ -1501,16 +1619,17 @@ static void CensusVehicles()
     const DWORD now = GameTimeMs();
     if (now - gStartMs < kStartupWarmupMs) return;
 
+    const DWORD censusInterval = gCfg.RainbowMode
+        ? kRainbowVehicleCensusIntervalMs
+        : ((gLastObservedPlayerSpeed >= kFastTravelSpeed) ? kFastVehicleCensusIntervalMs : kVehicleCensusIntervalMs);
+    if (now - gLastCensusMs < censusInterval) return;
+
     Ped player = PLAYER::PLAYER_PED_ID();
     if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
 
     const Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(player, true);
     const VehicleEvalContext ctx = MakeVehicleEvalContext(playerPos, now);
     gLastObservedPlayerSpeed = ctx.playerSpeed;
-    const DWORD censusInterval = gCfg.RainbowMode
-        ? kRainbowVehicleCensusIntervalMs
-        : ((ctx.playerSpeed >= kFastTravelSpeed) ? kFastVehicleCensusIntervalMs : kVehicleCensusIntervalMs);
-    if (now - gLastCensusMs < censusInterval) return;
     gLastCensusMs = now;
 
     Vehicle pool[kScanArraySize];
@@ -1550,7 +1669,7 @@ static void CensusVehicles()
         }
 
         VehicleRuntimeInfo info;
-        if (!PopulateVehicleRuntimeInfo(veh, ctx, info, true, true))
+        if (!PopulateVehicleRuntimeInfo(veh, ctx, info, false, false))
             continue;
 
         SeenInfo& si = GetOrResetVehicleState(veh, info.model, identity, now);
@@ -1561,9 +1680,12 @@ static void CensusVehicles()
             continue;
         }
 
-        // By default the census covers the whole streamed vehicle pool, allowing
-        // colors to be assigned before vehicles get close enough to be noticed.
-        // Radius mode remains available as a compatibility fallback.
+        if (!gCfg.ProcessAllLoadedVehicles || gCfg.RequireOffscreenApply)
+        {
+            info.coords = ENTITY::GET_ENTITY_COORDS(veh, true);
+            info.hasCoords = true;
+        }
+
         if (!gCfg.ProcessAllLoadedVehicles)
         {
             const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
@@ -1574,6 +1696,9 @@ static void CensusVehicles()
             }
         }
 
+        info.onScreen = ENTITY::IS_ENTITY_ON_SCREEN(veh) != 0;
+        info.onScreenKnown = true;
+
         RegisterVehicleSeen(veh, info, now, identity);
 
         if (!ShouldQueueVehicleForProcessing(info, si, playerPos, now, ctx.playerSpeed))
@@ -1582,9 +1707,6 @@ static void CensusVehicles()
             continue;
         }
 
-        // Hidden vehicles remain highest priority. During fast travel, distant
-        // visible vehicles are also urgent so the queue cannot fall behind the
-        // player's closing speed.
         const bool fastVisible = ctx.playerSpeed >= kFastTravelSpeed && info.onScreenKnown && info.onScreen;
         const bool urgent = (info.onScreenKnown && !info.onScreen) || fastVisible;
         QueueVehicleCandidate(veh, si, urgent);
@@ -1614,7 +1736,7 @@ static bool PopNextVehicleCandidate(VehicleCandidate& outCandidate)
 
 static void ProcessVehicleCandidates()
 {
-    if (!gCfg.Enabled) return;
+    if (!gCfg.Enabled || (gUrgentCandidates.empty() && gNormalCandidates.empty())) return;
 
     Ped player = PLAYER::PLAYER_PED_ID();
     if (!ENTITY::DOES_ENTITY_EXIST(player)) return;
@@ -1655,7 +1777,7 @@ static void ProcessVehicleCandidates()
             continue;
 
         VehicleRuntimeInfo info;
-        if (!PopulateVehicleRuntimeInfo(candidate.handle, ctx, info, true, true))
+        if (!PopulateVehicleRuntimeInfo(candidate.handle, ctx, info, false, false))
             continue;
 
         if (info.model != si.model)
@@ -1675,6 +1797,12 @@ static void ProcessVehicleCandidates()
             continue;
         }
 
+        if (!gCfg.ProcessAllLoadedVehicles || gCfg.RequireOffscreenApply)
+        {
+            info.coords = ENTITY::GET_ENTITY_COORDS(candidate.handle, true);
+            info.hasCoords = true;
+        }
+
         if (!gCfg.ProcessAllLoadedVehicles)
         {
             const float radius = info.isAircraft ? gCfg.AircraftRadius : gCfg.Radius;
@@ -1684,6 +1812,9 @@ static void ProcessVehicleCandidates()
                 continue;
             }
         }
+
+        info.onScreen = ENTITY::IS_ENTITY_ON_SCREEN(candidate.handle) != 0;
+        info.onScreenKnown = true;
 
         RegisterVehicleSeen(candidate.handle, info, now, currentIdentity);
 
@@ -1784,6 +1915,11 @@ static void LoadConfig()
     gCfg.SkipEmergency = IniBool(ini, "Filters", "SkipEmergency", true);
     gCfg.SkipMissionVehicles = IniBool(ini, "Filters", "SkipMissionVehicles", true);
     gCfg.ServiceVehiclesKeepColors = IniBool(ini, "Filters", "ServiceVehiclesKeepColors", true);
+    gCfg.Whitelist = IniBool(ini, "Filters", "Whitelist", false);
+    gCfg.ClassWhitelist = IniBool(ini, "Filters", "ClassWhitelist", false);
+    LoadVehicleModelList(ini, "VehicleBlacklist", gCfg.VehicleBlacklist);
+    LoadVehicleModelList(ini, "VehicleWhitelist", gCfg.VehicleWhitelist);
+    LoadVehicleClassWhitelist(ini);
     gCfg.RequireOffscreenApply = IniBool(ini, "Filters", "RequireOffscreenApply", true);
     gCfg.StrictSpawnOnly = IniBool(ini, "Filters", "StrictSpawnOnly", true);
     gCfg.NewlySeenMaxAgeMs = IniInt(ini, "Filters", "NewlySeenMaxAgeMs", 900);
@@ -1824,6 +1960,11 @@ static void LoadConfig()
             << " UpdateIntervalMs=" << gCfg.UpdateIntervalMs
             << " ProcessAllLoadedVehicles=" << (gCfg.ProcessAllLoadedVehicles ? 1 : 0)
             << " ParkedVehicleColors=" << (gCfg.ParkedVehicleColors ? 1 : 0)
+            << " VehicleBlacklistCount=" << gCfg.VehicleBlacklist.size()
+            << " Whitelist=" << (gCfg.Whitelist ? 1 : 0)
+            << " VehicleWhitelistCount=" << gCfg.VehicleWhitelist.size()
+            << " ClassWhitelist=" << (gCfg.ClassWhitelist ? 1 : 0)
+            << " VehicleClassWhitelistCount=" << gCfg.VehicleClassWhitelist.size()
             << " RequireOffscreenApply=" << (gCfg.RequireOffscreenApply ? 1 : 0)
             << " StrictSpawnOnly=" << (gCfg.StrictSpawnOnly ? 1 : 0)
             << " coverage=all_loaded_eligible"
