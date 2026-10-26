@@ -12,42 +12,6 @@ A ScriptHookV plugin that enhances GTA V traffic immersion by increasing the var
 
 ---
 
-## Features
-
-### Better traffic variety
-
-* Much wider spread of vehicle colors
-* Less repetition across nearby traffic
-* Strong anti-repeat logic for color families and exact combinations
-* Better primary and secondary paint pairing
-
-### Multiple color styles
-
-* **Realistic mode** for believable real-world traffic colors
-* **Non-realistic mode** for more variety and less restraint
-* **Rainbow mode** for maximum chaos and aggressive instant recoloring
-
-### Extra appearance options
-
-* Optional livery variation
-* Optional decal variation
-* Optional wheel color variation
-* Optional aircraft support
-
----
-
-## Highlights
-
-* Native **ASI / ScriptHookV** implementation
-* Strong anti-repetition system
-* Realistic and non-realistic color modes
-* Rainbow mode for instant high-variety traffic
-* Smooth, stable background behavior
-* Simple installation
-* Easy INI customization
-
----
-
 ## Installation
 
 1. Install **[ScriptHookV](https://www.dev-c.com/gtav/scripthookv/)**
@@ -57,58 +21,11 @@ A ScriptHookV plugin that enhances GTA V traffic immersion by increasing the var
 
 ---
 
-## Configuration
-
-The mod includes an `.ini` file with options for:
-
-* enabling or disabling color changes
-* liveries and decals
-* wheel colors
-* realistic or non-realistic color behavior
-* rainbow mode
-* aircraft support
-* logging
-* notification display
-* reload cheat code
-
-### INI reload
-
-The config can be reloaded in-game using the included cheat code:
-
-```ini
-ReloadCheatCode=DTCRELOAD
-```
-
----
-
-## What it changes
-
-### Vanilla traffic
-
-* Reuses the same colors too often
-* Too many repeated paint families
-* Too many familiar combinations appearing back-to-back
-* Limited variety in normal traffic flow
-
-### Dynamic Traffic Colors
-
-* More balanced color distribution
-* Better spread across different color groups
-* Fewer repeated primaries and secondaries
-* Less exact combo reuse
-* More interesting traffic overall
-
----
-
 ## Credits
 
 Created by **Nochala**
 
 **Alexander Blade — for ScriptHookV**
-
-Additional thanks to:
-- The GTA V modding community for documentation, shared research, and reverse-engineering efforts
-- Everyone who reports bugs or provides feedback — your input directly improves future updates
 
 ---
 
