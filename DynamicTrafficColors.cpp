@@ -733,16 +733,46 @@ static const std::vector<int>& PickColorPool(const WeightedPalette& p, bool allo
     return p.rare;
 }
 
-static int CountInRecent(const std::deque<int>& recent, int color)
+struct RecentColorStats
 {
-    int c = 0;
-    for (size_t i = 0; i < recent.size(); ++i) if (recent[i] == color) ++c;
-    return c;
-}
+    int counts[256];
+    int lastDistances[256];
 
-static bool RecentContains(const std::deque<int>& recent, int color)
+    explicit RecentColorStats(const std::deque<int>& recent)
+    {
+        std::fill(counts, counts + 256, 0);
+        std::fill(lastDistances, lastDistances + 256, -1);
+        for (size_t i = 0; i < recent.size(); ++i)
+        {
+            const int value = recent[i];
+            if (value >= 0 && value < 256)
+                ++counts[value];
+        }
+        int distance = 0;
+        for (std::deque<int>::const_reverse_iterator it = recent.rbegin(); it != recent.rend(); ++it, ++distance)
+        {
+            const int value = *it;
+            if (value >= 0 && value < 256 && lastDistances[value] < 0)
+                lastDistances[value] = distance;
+        }
+    }
+};
+
+static bool IsWhiteVehicleColor(int color)
 {
-    return std::find(recent.begin(), recent.end(), color) != recent.end();
+    switch (color)
+    {
+    case 111:
+    case 112:
+    case 121:
+    case 122:
+    case 131:
+    case 132:
+    case 134:
+        return true;
+    default:
+        return false;
+    }
 }
 
 static int RecentDistanceFromBack(const std::deque<int>& recent, int value, size_t maxLookback)
@@ -757,13 +787,9 @@ static int RecentDistanceFromBack(const std::deque<int>& recent, int value, size
     return -1;
 }
 
-static int RecentValuePenalty(const std::deque<int>& recent, int value, size_t maxLookback, int immediatePenalty, int floorPenalty)
+static int RecentPenaltyAtDistance(int distance, size_t maxLookback, int immediatePenalty, int floorPenalty)
 {
-    if (maxLookback == 0 || immediatePenalty <= 0)
-        return 0;
-
-    const int distance = RecentDistanceFromBack(recent, value, maxLookback);
-    if (distance < 0)
+    if (maxLookback == 0 || immediatePenalty <= 0 || distance < 0 || (size_t)distance >= maxLookback)
         return 0;
 
     if (floorPenalty < 0)
@@ -777,6 +803,13 @@ static int RecentValuePenalty(const std::deque<int>& recent, int value, size_t m
     const int span = immediatePenalty - floorPenalty;
     const int reduction = (int)((long long)span * distance / (long long)(maxLookback - 1));
     return immediatePenalty - reduction;
+}
+
+static int RecentValuePenalty(const std::deque<int>& recent, int value, size_t maxLookback, int immediatePenalty, int floorPenalty)
+{
+    if (maxLookback == 0 || immediatePenalty <= 0)
+        return 0;
+    return RecentPenaltyAtDistance(RecentDistanceFromBack(recent, value, maxLookback), maxLookback, immediatePenalty, floorPenalty);
 }
 
 static int BucketId(const WeightedPalette& p, int color)
@@ -831,6 +864,7 @@ static int PickBucketedColor(const WeightedPalette& p, bool allowBright, int var
             else if (bucket == 3) score -= 35;
             else if (bucket == 4) score -= 25;
             else score -= 120;
+            if (IsWhiteVehicleColor(color)) score -= 950;
         }
 
         if (!found || score > bestScore)
@@ -899,6 +933,7 @@ static float gLastObservedPlayerSpeed = 0.0f;
 static Ped gLastObservedPlayerPed = 0;
 static Vehicle gLastObservedPlayerVehicle = 0;
 static std::string gCheatBuffer;
+static std::string gReloadCheatCodeUpper;
 static DWORD gLastCheatKeyMs = 0;
 
 static std::uintptr_t GetVehicleIdentity(Vehicle veh)
@@ -1129,11 +1164,6 @@ static int PackCombo(int primary, int secondary)
     return ((primary & 0xFF) << 8) | (secondary & 0xFF);
 }
 
-static bool RecentContainsCombo(const std::deque<int>& recent, int combo)
-{
-    return std::find(recent.begin(), recent.end(), combo) != recent.end();
-}
-
 static int CountComboInRecent(const std::deque<int>& recent, int combo)
 {
     int c = 0;
@@ -1301,7 +1331,7 @@ static int ScoreRealisticTwoTonePair(int primaryBucket, int secondaryBucket, boo
     return -500;
 }
 
-static int PickRealisticSecondaryColor(const WeightedPalette& palette, int primary, const std::deque<int>& recentSecondary)
+static int PickRealisticSecondaryColor(const WeightedPalette& palette, int primary, const RecentColorStats& secondaryStats, const RecentColorStats& globalStats)
 {
     const int primaryBucket = BucketId(palette, primary);
 
@@ -1319,16 +1349,17 @@ static int PickRealisticSecondaryColor(const WeightedPalette& palette, int prima
 
         const int bucket = BucketId(palette, candidate);
         const int combo = PackCombo(primary, candidate);
+        const int comboHits = CountComboInRecent(gRecentCombos, combo);
 
         int score = RandInt(0, 40);
         score += ScoreRealisticTwoTonePair(primaryBucket, bucket, candidate == primary);
-        score -= CountInRecent(recentSecondary, candidate) * MaxInt(6, gCfg.NonRealisticOverusedColorPenalty * 2);
-        score -= CountInRecent(gRecentGlobal, candidate) * 5;
-        score -= CountComboInRecent(gRecentCombos, combo) * 140;
+        score -= secondaryStats.counts[candidate] * MaxInt(6, gCfg.NonRealisticOverusedColorPenalty * 2);
+        score -= globalStats.counts[candidate] * 5;
+        score -= comboHits * 140;
 
-        if (RecentContains(recentSecondary, candidate)) score -= 60;
-        if (RecentContains(gRecentGlobal, candidate)) score -= 25;
-        if (RecentContainsCombo(gRecentCombos, combo)) score -= 200;
+        if (secondaryStats.counts[candidate] > 0) score -= 60;
+        if (globalStats.counts[candidate] > 0) score -= 25;
+        if (comboHits > 0) score -= 200;
 
         if (score > bestScore)
         {
@@ -1350,6 +1381,17 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
     const bool nonRealisticMode = !gCfg.RealisticVehicleColors && !gCfg.RainbowMode;
     const int realisticPrimaryBucket = (gCfg.RealisticVehicleColors && !gCfg.RainbowMode) ? PickRealisticPrimaryBucket() : -1;
     const int tries = gCfg.RainbowMode ? 12 : (nonRealisticMode ? 12 : 8);
+    const RecentColorStats primaryStats(recentPrimary);
+    const RecentColorStats secondaryStats(recentSecondary);
+    const RecentColorStats globalStats(gRecentGlobal);
+    const RecentColorStats globalPrimaryStats(gRecentPrimaryGlobal);
+    const RecentColorStats globalSecondaryStats(gRecentSecondaryGlobal);
+    const size_t modelPrimaryLookback = (size_t)MinInt(nonRealisticMode ? 24 : 14, MaxInt(0, aircraft ? gCfg.AircraftRecentPerModel : gCfg.RecentPerModel));
+    const size_t modelSecondaryLookback = (size_t)MinInt(nonRealisticMode ? 18 : 10, MaxInt(0, aircraft ? gCfg.AircraftRecentPerModel : gCfg.RecentPerModel));
+    const size_t globalPrimaryLookback = (size_t)MinInt(nonRealisticMode ? 40 : 24, MaxInt(0, gCfg.GlobalRecentColorMemory));
+    const size_t globalSecondaryLookback = (size_t)MinInt(nonRealisticMode ? 28 : 16, MaxInt(0, gCfg.GlobalRecentColorMemory));
+    const bool allowBrightSelection = gCfg.RainbowMode || (!gCfg.RealisticVehicleColors && gCfg.AllowBrightColors);
+    const int varietyMultiplier = gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier;
 
     int bucketHits[7] = {};
     int exactHits[256] = {};
@@ -1374,16 +1416,15 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
 
     for (int i = 0; i < tries; ++i)
     {
-        const bool allowBrightSelection = gCfg.RainbowMode || (!gCfg.RealisticVehicleColors && gCfg.AllowBrightColors);
-        const int p = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, bucketHits, exactHits, lastDistances, realisticPrimaryBucket);
+        const int p = PickBucketedColor(palette, allowBrightSelection, varietyMultiplier, bucketHits, exactHits, lastDistances, realisticPrimaryBucket);
 
         int s = p;
         if (gCfg.TwoToneColors)
         {
             if (gCfg.RealisticVehicleColors && !gCfg.RainbowMode)
-                s = PickRealisticSecondaryColor(palette, p, recentSecondary);
+                s = PickRealisticSecondaryColor(palette, p, secondaryStats, globalStats);
             else
-                s = PickBucketedColor(palette, allowBrightSelection, gCfg.RainbowMode ? 420 : gCfg.ColorVarietyMultiplier, bucketHits, exactHits, lastDistances);
+                s = PickBucketedColor(palette, allowBrightSelection, varietyMultiplier, bucketHits, exactHits, lastDistances);
         }
 
         const int primaryBucket = BucketId(palette, p);
@@ -1444,44 +1485,46 @@ static bool PickPrimarySecondary(Hash model, bool aircraft, int& outPrimary, int
                 score += ScoreRealisticTwoTonePair(primaryBucket, secondaryBucket, sameColor);
             else if (sameColor)
                 score += 220;
+            if (IsWhiteVehicleColor(p)) score -= 350;
         }
 
-        score -= CountInRecent(recentPrimary, p) * MaxInt(8, gCfg.NonRealisticOverusedColorPenalty * 3);
-        score -= CountInRecent(recentSecondary, s) * MaxInt(7, gCfg.NonRealisticOverusedColorPenalty * 2);
-        score -= CountInRecent(gRecentGlobal, p) * 5;
-        score -= CountInRecent(gRecentGlobal, s) * 4;
+        const int comboHits = CountComboInRecent(gRecentCombos, combo);
+        const int primaryModelHits = primaryStats.counts[p];
+        const int secondaryModelHits = secondaryStats.counts[s];
+        const int primaryGlobalHits = globalStats.counts[p];
+        const int secondaryGlobalHits = globalStats.counts[s];
+
+        score -= primaryModelHits * MaxInt(8, gCfg.NonRealisticOverusedColorPenalty * 3);
+        score -= secondaryModelHits * MaxInt(7, gCfg.NonRealisticOverusedColorPenalty * 2);
+        score -= primaryGlobalHits * 5;
+        score -= secondaryGlobalHits * 4;
         score -= bucketHits[primaryBucket] * MaxInt(10, gCfg.ColorVarietyMultiplier / 5);
         score -= bucketHits[secondaryBucket] * MaxInt(8, gCfg.ColorVarietyMultiplier / 6);
-        score -= CountComboInRecent(gRecentCombos, combo) * 95;
+        score -= comboHits * 95;
 
-        const size_t modelPrimaryLookback = (size_t)MinInt(nonRealisticMode ? 24 : 14, MaxInt(0, aircraft ? gCfg.AircraftRecentPerModel : gCfg.RecentPerModel));
-        const size_t modelSecondaryLookback = (size_t)MinInt(nonRealisticMode ? 18 : 10, MaxInt(0, aircraft ? gCfg.AircraftRecentPerModel : gCfg.RecentPerModel));
-        const size_t globalPrimaryLookback = (size_t)MinInt(nonRealisticMode ? 40 : 24, MaxInt(0, gCfg.GlobalRecentColorMemory));
-        const size_t globalSecondaryLookback = (size_t)MinInt(nonRealisticMode ? 28 : 16, MaxInt(0, gCfg.GlobalRecentColorMemory));
-
-        score -= RecentValuePenalty(recentPrimary, p, modelPrimaryLookback, nonRealisticMode ? 3200 : 2400, nonRealisticMode ? 260 : 180);
-        score -= RecentValuePenalty(gRecentPrimaryGlobal, p, globalPrimaryLookback, nonRealisticMode ? 2200 : 1650, nonRealisticMode ? 180 : 120);
-        score -= RecentValuePenalty(recentSecondary, s, modelSecondaryLookback, nonRealisticMode ? 1250 : 700, nonRealisticMode ? 120 : 80);
-        score -= RecentValuePenalty(gRecentSecondaryGlobal, s, globalSecondaryLookback, nonRealisticMode ? 850 : 450, nonRealisticMode ? 90 : 60);
+        score -= RecentPenaltyAtDistance(primaryStats.lastDistances[p], modelPrimaryLookback, nonRealisticMode ? 3200 : 2400, nonRealisticMode ? 260 : 180);
+        score -= RecentPenaltyAtDistance(globalPrimaryStats.lastDistances[p], globalPrimaryLookback, nonRealisticMode ? 2200 : 1650, nonRealisticMode ? 180 : 120);
+        score -= RecentPenaltyAtDistance(secondaryStats.lastDistances[s], modelSecondaryLookback, nonRealisticMode ? 1250 : 700, nonRealisticMode ? 120 : 80);
+        score -= RecentPenaltyAtDistance(globalSecondaryStats.lastDistances[s], globalSecondaryLookback, nonRealisticMode ? 850 : 450, nonRealisticMode ? 90 : 60);
         score -= RecentValuePenalty(gRecentCombos, combo, nonRealisticMode ? 36 : 24, nonRealisticMode ? 1800 : 1050, nonRealisticMode ? 160 : 100);
 
-        if (RecentContainsCombo(gRecentCombos, combo)) score -= 180;
-        if (RecentContains(recentPrimary, p)) score -= 65;
-        if (RecentContains(recentSecondary, s)) score -= 45;
-        if (RecentContains(gRecentGlobal, p)) score -= 25;
-        if (RecentContains(gRecentGlobal, s)) score -= 18;
+        if (comboHits > 0) score -= 180;
+        if (primaryModelHits > 0) score -= 65;
+        if (secondaryModelHits > 0) score -= 45;
+        if (primaryGlobalHits > 0) score -= 25;
+        if (secondaryGlobalHits > 0) score -= 18;
 
         if (!gCfg.RealisticVehicleColors || gCfg.RainbowMode)
         {
-            if (RecentContains(recentPrimary, p))
+            if (primaryModelHits > 0)
                 score -= gCfg.NonRealisticRecentPrimaryMemory * (nonRealisticMode ? 2 : 1);
-            if (RecentContains(recentSecondary, s))
+            if (secondaryModelHits > 0)
                 score -= gCfg.NonRealisticRecentSecondaryMemory * (nonRealisticMode ? 2 : 1);
 
             if (nonRealisticMode)
             {
-                score -= CountInRecent(recentPrimary, p) * MaxInt(18, gCfg.NonRealisticOverusedColorPenalty * 7);
-                score -= CountInRecent(recentSecondary, s) * MaxInt(14, gCfg.NonRealisticOverusedColorPenalty * 5);
+                score -= primaryModelHits * MaxInt(18, gCfg.NonRealisticOverusedColorPenalty * 7);
+                score -= secondaryModelHits * MaxInt(14, gCfg.NonRealisticOverusedColorPenalty * 5);
 
                 if (gCfg.TwoToneColors && p != s)
                     score += 180;
@@ -1556,7 +1599,6 @@ static bool TryApplyDecal(Vehicle veh, bool aircraft)
 
 static void ApplyToVehicle(Vehicle veh, const VehicleRuntimeInfo& info)
 {
-    if (!AllowVehicleByFilters(veh, info)) return;
     const bool aircraft = info.isAircraft;
 
     int primary = 0, secondary = 0;
@@ -1878,7 +1920,7 @@ static bool UpdateReloadCheatCode()
             gCheatBuffer.erase(gCheatBuffer.begin());
         gCheatBuffer.push_back((char)std::toupper((unsigned char)c));
 
-        const std::string target = ToUpperAscii(gCfg.ReloadCheatCode);
+        const std::string& target = gReloadCheatCodeUpper;
         if (!target.empty() && gCheatBuffer.size() >= target.size())
         {
             if (gCheatBuffer.compare(gCheatBuffer.size() - target.size(), target.size(), target) == 0)
@@ -1943,6 +1985,7 @@ static void LoadConfig()
 
     gCfg.ShowLoadNotification = IniBool(ini, "UI", "ShowLoadNotification", true);
     gCfg.ReloadCheatCode = IniString(ini, "UI", "ReloadCheatCode", "DTCRELOAD");
+    gReloadCheatCodeUpper = ToUpperAscii(gCfg.ReloadCheatCode);
 
     bool logEnabled = IniBool(ini, "Logging", "EnableLog", false);
     const std::string logPath = LogPathFromIni(ini);
